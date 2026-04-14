@@ -71,6 +71,12 @@ pythonVersion = "3.12"
 typeCheckingMode = "strict"
 reportMissingTypeStubs = false
 
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
