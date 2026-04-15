@@ -7,10 +7,24 @@ from trade_strats.strategy.labeler import Bar, Color, Scenario, classify, color
 
 @st.composite
 def bars(draw: st.DrawFn) -> Bar:
-    low = draw(st.floats(min_value=0.01, max_value=10_000.0, allow_nan=False, allow_infinity=False))
-    high = draw(st.floats(min_value=low, max_value=10_000.0, allow_nan=False, allow_infinity=False))
-    o = draw(st.floats(min_value=low, max_value=high, allow_nan=False, allow_infinity=False))
-    c = draw(st.floats(min_value=low, max_value=high, allow_nan=False, allow_infinity=False))
+    # Round prices to cents so arithmetic tests (e.g. mirror symmetry) stay
+    # exact under float math. Realistic for US equities with 0.01 tick size.
+    low = round(
+        draw(st.floats(min_value=1.0, max_value=10_000.0, allow_nan=False, allow_infinity=False)),
+        2,
+    )
+    high = round(
+        draw(st.floats(min_value=low, max_value=10_000.0, allow_nan=False, allow_infinity=False)),
+        2,
+    )
+    if high < low:
+        high = low
+    o = round(
+        draw(st.floats(min_value=low, max_value=high, allow_nan=False, allow_infinity=False)), 2
+    )
+    c = round(
+        draw(st.floats(min_value=low, max_value=high, allow_nan=False, allow_infinity=False)), 2
+    )
     return Bar(open=o, high=high, low=low, close=c)
 
 
