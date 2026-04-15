@@ -32,6 +32,10 @@ class AlpacaSettings:
     base_url: str
     data_feed: str
 
+    @property
+    def paper(self) -> bool:
+        return "paper" in self.base_url.lower()
+
     @classmethod
     def from_env(cls) -> "AlpacaSettings":
         def _required(name: str) -> str:
