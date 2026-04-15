@@ -202,6 +202,10 @@ def _walk_forward_markdown(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _suffixed(stem: str, label: str) -> str:
+    return f"{stem}_{label}" if label else stem
+
+
 def save_backtest(
     result: BacktestResult,
     out_dir: Path,
@@ -209,13 +213,16 @@ def save_backtest(
     start: str,
     end: str,
     config: Config,
+    label: str = "",
 ) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     run_date = datetime.now(UTC).date().isoformat()
-    stem = f"{symbol}_{start}_to_{end}_run-{run_date}"
+    stem = _suffixed(f"{symbol}_{start}_to_{end}_run-{run_date}", label)
     json_path = out_dir / f"{stem}.json"
     md_path = out_dir / f"{stem}.md"
     data = backtest_to_dict(result, symbol, start, end, config)
+    if label:
+        data["label"] = label
     json_path.write_text(json.dumps(data, indent=2))
     md_path.write_text(_backtest_markdown(data))
     return json_path, md_path
@@ -228,13 +235,16 @@ def save_walk_forward(
     end: str,
     config: Config,
     starting_equity: float,
+    label: str = "",
 ) -> tuple[Path, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     run_date = datetime.now(UTC).date().isoformat()
-    stem = f"{start}_to_{end}_run-{run_date}"
+    stem = _suffixed(f"{start}_to_{end}_run-{run_date}", label)
     json_path = out_dir / f"{stem}.json"
     md_path = out_dir / f"{stem}.md"
     data = walk_forward_to_dict(report, start, end, config, starting_equity)
+    if label:
+        data["label"] = label
     json_path.write_text(json.dumps(data, indent=2))
     md_path.write_text(_walk_forward_markdown(data))
     return json_path, md_path

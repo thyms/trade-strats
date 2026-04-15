@@ -145,6 +145,7 @@ def backtest(
     config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     env_file: Path = typer.Option(DEFAULT_ENV, "--env", "-e"),
     equity: float = typer.Option(50_000.0, "--equity", help="Starting equity for sim"),
+    label: str = typer.Option("", "--label", help="Filename suffix to distinguish variants"),
 ) -> None:
     """Fetch historical bars from Alpaca and run the backtest for one symbol."""
     load_dotenv(env_file)
@@ -177,6 +178,7 @@ def backtest(
             start=start,
             end=end,
             config=cfg,
+            label=label,
         )
         typer.echo("")
         typer.echo(f"Saved: {json_path}")
@@ -192,6 +194,7 @@ def walk_forward_cmd(
     config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
     env_file: Path = typer.Option(DEFAULT_ENV, "--env", "-e"),
     equity: float = typer.Option(50_000.0, "--equity"),
+    label: str = typer.Option("", "--label", help="Filename suffix to distinguish variants"),
 ) -> None:
     """Run backtest on each watchlist symbol and print per-pattern breakdowns."""
     load_dotenv(env_file)
@@ -227,6 +230,7 @@ def walk_forward_cmd(
             end=end,
             config=cfg,
             starting_equity=equity,
+            label=label,
         )
         typer.echo("")
         typer.echo(f"Saved: {json_path}")
