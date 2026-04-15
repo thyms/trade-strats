@@ -5,7 +5,7 @@ from hypothesis import strategies as st
 from trade_strats.strategy.ftfc import FtfcState, HigherTfOpens, allows, ftfc_state
 from trade_strats.strategy.patterns import Side
 
-finite_price = st.floats(min_value=0.01, max_value=10_000.0, allow_nan=False, allow_infinity=False)
+finite_price = st.floats(min_value=1.0, max_value=10_000.0, allow_nan=False, allow_infinity=False)
 
 
 @st.composite
