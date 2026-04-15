@@ -1,13 +1,21 @@
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import typer
 from dotenv import load_dotenv
 
+from trade_strats.aggregation import TimedBar, aggregate, bucket_4h
+from trade_strats.backtest import (
+    OpensProvider,
+    build_opens_provider,
+    run_backtest,
+    run_walk_forward,
+)
 from trade_strats.config import Config
 from trade_strats.execution import Executor
 from trade_strats.journal import Journal
-from trade_strats.market_data import AlpacaSettings
+from trade_strats.market_data import AlpacaSettings, MarketData
 from trade_strats.orchestrator import run_session
 from trade_strats.reconcile import format_report, reconcile
 
@@ -103,6 +111,103 @@ def flat_all(
         executor = Executor(settings)
         await executor.flat_all()
         typer.echo("flat-all executed")
+
+    asyncio.run(_go())
+
+
+def _parse_date(value: str) -> datetime:
+    """Accept YYYY-MM-DD or full ISO string; return UTC datetime."""
+    if "T" in value:
+        dt = datetime.fromisoformat(value)
+    else:
+        dt = datetime.fromisoformat(f"{value}T00:00:00")
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+async def _fetch_for_backtest(
+    md: MarketData, symbol: str, start: datetime, end: datetime
+) -> tuple[list[TimedBar], list[TimedBar], list[TimedBar], list[TimedBar]]:
+    """Fetch 15m + 1H + 1D from Alpaca; locally aggregate 4H from 1H."""
+    context_start = start - timedelta(days=30)
+    bars_15m = await md.backfill(symbol, "15Min", start, end)
+    daily = await md.backfill(symbol, "1D", context_start, end)
+    one_hour = await md.backfill(symbol, "1H", context_start, end)
+    four_hour = aggregate(one_hour, bucket_4h)
+    return bars_15m, daily, four_hour, one_hour
+
+
+@app.command()
+def backtest(
+    symbol: str = typer.Option(..., "--symbol", "-s", help="Ticker to backtest"),
+    start: str = typer.Option(..., "--start", help="YYYY-MM-DD"),
+    end: str = typer.Option(..., "--end", help="YYYY-MM-DD"),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+    env_file: Path = typer.Option(DEFAULT_ENV, "--env", "-e"),
+    equity: float = typer.Option(50_000.0, "--equity", help="Starting equity for sim"),
+) -> None:
+    """Fetch historical bars from Alpaca and run the backtest for one symbol."""
+    load_dotenv(env_file)
+    cfg = Config.from_yaml(config)
+    start_dt = _parse_date(start)
+    end_dt = _parse_date(end)
+
+    async def _go() -> None:
+        settings = AlpacaSettings.from_env()
+        md = MarketData(settings)
+        typer.echo(f"Fetching {symbol} bars from {start} to {end}...")
+        bars_15m, daily, four_hour, one_hour = await _fetch_for_backtest(
+            md, symbol, start_dt, end_dt
+        )
+        typer.echo(
+            f"Fetched: {len(bars_15m)} 15m, {len(daily)} 1D, "
+            f"{len(four_hour)} 4H (aggregated), {len(one_hour)} 1H"
+        )
+        if not bars_15m:
+            typer.echo("No 15m bars in range.", err=True)
+            raise typer.Exit(code=1)
+        provider = build_opens_provider(daily, four_hour, one_hour)
+        result = run_backtest(symbol, bars_15m, provider, cfg, starting_equity=equity)
+        typer.echo("")
+        typer.echo(result.summary())
+
+    asyncio.run(_go())
+
+
+@app.command(name="walk-forward")
+def walk_forward_cmd(
+    start: str = typer.Option(..., "--start", help="YYYY-MM-DD"),
+    end: str = typer.Option(..., "--end", help="YYYY-MM-DD"),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c"),
+    env_file: Path = typer.Option(DEFAULT_ENV, "--env", "-e"),
+    equity: float = typer.Option(50_000.0, "--equity"),
+) -> None:
+    """Run backtest on each watchlist symbol and print per-pattern breakdowns."""
+    load_dotenv(env_file)
+    cfg = Config.from_yaml(config)
+    start_dt = _parse_date(start)
+    end_dt = _parse_date(end)
+
+    async def _go() -> None:
+        settings = AlpacaSettings.from_env()
+        md = MarketData(settings)
+        bars_by_symbol: dict[str, list[TimedBar]] = {}
+        opens_by_symbol: dict[str, OpensProvider] = {}
+        for symbol in cfg.watchlist:
+            typer.echo(f"Fetching {symbol}...")
+            bars_15m, daily, four_hour, one_hour = await _fetch_for_backtest(
+                md, symbol, start_dt, end_dt
+            )
+            if not bars_15m:
+                typer.echo(f"  {symbol}: no 15m bars, skipping", err=True)
+                continue
+            bars_by_symbol[symbol] = bars_15m
+            opens_by_symbol[symbol] = build_opens_provider(daily, four_hour, one_hour)
+        if not bars_by_symbol:
+            typer.echo("No data fetched for any symbol.", err=True)
+            raise typer.Exit(code=1)
+        report = run_walk_forward(bars_by_symbol, opens_by_symbol, cfg, starting_equity=equity)
+        typer.echo("")
+        typer.echo(report.summary())
 
     asyncio.run(_go())
 

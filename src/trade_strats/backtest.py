@@ -1,4 +1,6 @@
-from collections.abc import Callable, Sequence
+import bisect
+from collections import defaultdict
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -333,4 +335,177 @@ def _compute_metrics(trades: list[SimulatedTrade], starting_equity: float) -> Ba
         profit_factor=profit_factor,
         max_drawdown=round(max_dd, 2),
         max_drawdown_pct=max_dd_pct,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Higher-TF opens provider built from historical bar series
+# ---------------------------------------------------------------------------
+
+
+def build_opens_provider(
+    daily_bars: Sequence[TimedBar],
+    four_hour_bars: Sequence[TimedBar],
+    one_hour_bars: Sequence[TimedBar],
+) -> OpensProvider:
+    """Build an OpensProvider that looks up each TF's active bucket open at a timestamp.
+
+    For each query timestamp, returns the open of the most recent bar whose
+    ts is <= target ts per timeframe. Bars must be sorted by ts.
+    """
+    d_ts = [b.ts for b in daily_bars]
+    d_opens = [b.open for b in daily_bars]
+    h4_ts = [b.ts for b in four_hour_bars]
+    h4_opens = [b.open for b in four_hour_bars]
+    h1_ts = [b.ts for b in one_hour_bars]
+    h1_opens = [b.open for b in one_hour_bars]
+
+    def _lookup(tsi: list[datetime], opens: list[float], ts: datetime) -> float | None:
+        i = bisect.bisect_right(tsi, ts)
+        if i == 0:
+            return None
+        return opens[i - 1]
+
+    def provider(ts: datetime) -> HigherTfOpens | None:
+        d = _lookup(d_ts, d_opens, ts)
+        h4 = _lookup(h4_ts, h4_opens, ts)
+        h1 = _lookup(h1_ts, h1_opens, ts)
+        if d is None or h4 is None or h1 is None:
+            return None
+        return HigherTfOpens(daily=d, four_hour=h4, one_hour=h1)
+
+    return provider
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward harness: run multiple symbols, report pattern breakdowns
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PatternBreakdown:
+    symbol: str
+    pattern: str
+    trade_count: int
+    win_count: int
+    win_rate: float
+    total_pnl: float
+    avg_r: float
+    profit_factor: float
+
+
+def _empty_breakdowns() -> list[PatternBreakdown]:
+    return []
+
+
+def _empty_results() -> dict[str, BacktestResult]:
+    return {}
+
+
+@dataclass(frozen=True, slots=True)
+class WalkForwardReport:
+    results: dict[str, BacktestResult] = field(default_factory=_empty_results)
+    breakdowns: list[PatternBreakdown] = field(default_factory=_empty_breakdowns)
+    total_pnl: float = 0.0
+    total_trades: int = 0
+
+    def summary(self) -> str:
+        lines = [
+            "Walk-forward report",
+            f"  Symbols:      {len(self.results)}",
+            f"  Total trades: {self.total_trades}",
+            f"  Total P&L:    ${self.total_pnl:,.2f}",
+            "",
+            "Per-symbol:",
+        ]
+        for symbol, res in self.results.items():
+            pf = "inf" if res.profit_factor == float("inf") else f"{res.profit_factor:.2f}"
+            lines.append(
+                f"  {symbol:<6}  trades={res.total_trades:<4}  "
+                f"win%={res.win_rate * 100:>5.1f}  PnL=${res.total_pnl:>10,.2f}  PF={pf}"
+            )
+        if self.breakdowns:
+            lines.extend(["", "Per-pattern breakdown:"])
+            lines.append(
+                f"  {'Symbol':<6} {'Pattern':<10} {'N':>4} {'Wins':>5} {'Win%':>6} "
+                f"{'PnL':>12} {'AvgR':>6} {'PF':>6}"
+            )
+            for b in self.breakdowns:
+                pf = "inf" if b.profit_factor == float("inf") else f"{b.profit_factor:.2f}"
+                lines.append(
+                    f"  {b.symbol:<6} {b.pattern:<10} {b.trade_count:>4} {b.win_count:>5} "
+                    f"{b.win_rate * 100:>5.1f}% ${b.total_pnl:>10,.2f} "
+                    f"{b.avg_r:>5.2f}R {pf:>6}"
+                )
+        return "\n".join(lines)
+
+
+def pattern_breakdowns(
+    trades_by_symbol: Mapping[str, Sequence[SimulatedTrade]],
+) -> list[PatternBreakdown]:
+    groups: dict[tuple[str, str], list[SimulatedTrade]] = defaultdict(list)
+    for symbol, trades in trades_by_symbol.items():
+        for t in trades:
+            groups[(symbol, t.kind.value)].append(t)
+
+    out: list[PatternBreakdown] = []
+    for (symbol, pattern), ts in groups.items():
+        wins = [t for t in ts if t.realized_pnl > 0]
+        losses = [t for t in ts if t.realized_pnl <= 0]
+        gw = sum(t.realized_pnl for t in wins)
+        gl = abs(sum(t.realized_pnl for t in losses))
+        pf = gw / gl if gl > 0 else float("inf")
+        win_rate = len(wins) / len(ts) if ts else 0.0
+        avg_r = sum(t.r_multiple for t in ts) / len(ts) if ts else 0.0
+        total = sum(t.realized_pnl for t in ts)
+        out.append(
+            PatternBreakdown(
+                symbol=symbol,
+                pattern=pattern,
+                trade_count=len(ts),
+                win_count=len(wins),
+                win_rate=win_rate,
+                total_pnl=round(total, 2),
+                avg_r=avg_r,
+                profit_factor=pf,
+            )
+        )
+    return sorted(out, key=lambda b: (b.symbol, b.pattern))
+
+
+def run_walk_forward(
+    bars_by_symbol: Mapping[str, Sequence[TimedBar]],
+    opens_by_symbol: Mapping[str, OpensProvider],
+    config: Config,
+    starting_equity: float = 50_000.0,
+) -> WalkForwardReport:
+    """Run backtest on each symbol independently and aggregate.
+
+    Each symbol starts from the same starting_equity (independent equity pools).
+    For a combined-equity portfolio backtest, use a different harness.
+    """
+    results: dict[str, BacktestResult] = {}
+    trades_by_symbol: dict[str, list[SimulatedTrade]] = {}
+    for symbol, bars in bars_by_symbol.items():
+        opens_provider = opens_by_symbol.get(symbol)
+        if opens_provider is None:
+            continue
+        result = run_backtest(
+            symbol=symbol,
+            bars_15m=bars,
+            opens_provider=opens_provider,
+            config=config,
+            starting_equity=starting_equity,
+        )
+        results[symbol] = result
+        trades_by_symbol[symbol] = result.trades
+
+    breakdowns = pattern_breakdowns(trades_by_symbol)
+    total_pnl = sum(r.total_pnl for r in results.values())
+    total_trades = sum(r.total_trades for r in results.values())
+    return WalkForwardReport(
+        results=results,
+        breakdowns=breakdowns,
+        total_pnl=round(total_pnl, 2),
+        total_trades=total_trades,
     )
