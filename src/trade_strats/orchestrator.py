@@ -1,17 +1,24 @@
+import asyncio
+import contextlib
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 
 from trade_strats.aggregation import ET, TimedBar
 from trade_strats.config import Config
 from trade_strats.execution import Executor, SubmittedBracket
 from trade_strats.journal import Journal, OrderRecord, TradeRecord
-from trade_strats.market_data import MarketData
+from trade_strats.market_data import AlpacaSettings, MarketData
+from trade_strats.reconcile import format_report, reconcile
 from trade_strats.risk import AccountSnapshot, Rejection, TradePlan
 from trade_strats.risk import evaluate as risk_evaluate
 from trade_strats.strategy.ftfc import FtfcState, HigherTfOpens, allows, ftfc_state
 from trade_strats.strategy.patterns import PatternKind, Setup, Side, detect
+from trade_strats.trade_updates import TradeUpdateHandler
+from trade_strats.tui import SessionState, run_tui
 
 
 class EvalOutcome(StrEnum):
@@ -265,7 +272,132 @@ async def evaluate_and_submit(
     )
 
 
-# Keep unused imports referenced so pyright doesn't prune them for re-exporters.
+# ---------------------------------------------------------------------------
+# Session runner (the top-level entry point)
+# ---------------------------------------------------------------------------
+
+
+async def _wait_until_et(target_time: str, session_date: str) -> None:
+    """Sleep until HH:MM ET on the given session_date (ISO YYYY-MM-DD)."""
+    hh, mm = (int(x) for x in target_time.split(":"))
+    y, m, d = (int(x) for x in session_date.split("-"))
+    target = datetime(y, m, d, hh, mm, tzinfo=ET)
+    delta = (target - datetime.now(ET)).total_seconds()
+    if delta > 0:
+        await asyncio.sleep(delta)
+
+
+async def force_flat_at_close(
+    executor: Executor,
+    journal: Journal,
+    config: Config,
+    session_date: str,
+) -> None:
+    await _wait_until_et(config.session.force_flat_et, session_date)
+    await journal.record_event("force_flat", reason="session_close")
+    await executor.flat_all()
+    account = await executor.get_account()
+    await journal.finalize_session(session_date, end_equity=account.equity)
+
+
+async def run_session(config: Config, schema_path: Path) -> None:
+    """Top-level entry point: reconcile, start session, run streams until EOD or cancelled."""
+    settings = AlpacaSettings.from_env()
+    md = MarketData(settings)
+    executor = Executor(settings)
+
+    journal = await Journal.open(
+        db_path=config.paths.db,
+        events_path=config.paths.events_log,
+        schema_path=schema_path,
+    )
+    async with journal:
+        report = await reconcile(executor, journal)
+        if not report.clean:
+            raise RuntimeError(
+                f"startup drift detected; refusing to start.\n{format_report(report)}"
+            )
+
+        account = await executor.get_account()
+        session_date = datetime.now(ET).date().isoformat()
+        await journal.upsert_session_start(session_date, account.equity)
+        await journal.record_event("session_start", equity=account.equity, date=session_date)
+
+        state = SessionState(
+            mode=config.mode,
+            equity=account.equity,
+            max_trades=config.account.max_trades_per_day,
+            loss_cap_usd=account.equity * config.account.daily_loss_cap_pct,
+            session_status="running",
+        )
+        for symbol in config.watchlist:
+            state.upsert_symbol(symbol)
+
+        buffers: dict[tuple[str, str], deque[TimedBar]] = {}
+
+        def _buf(sym: str, tf: str) -> deque[TimedBar]:
+            key = (sym, tf)
+            if key not in buffers:
+                buffers[key] = deque(maxlen=50)
+            return buffers[key]
+
+        async def on_bar_closed(symbol: str, tf: str, bar: TimedBar) -> None:
+            _buf(symbol, tf).append(bar)
+            sym_state = state.upsert_symbol(symbol)
+            sym_state.last_price = bar.close
+            if tf != "15Min":
+                return
+            opens = get_higher_opens(md, symbol)
+            sym_state.ftfc = ftfc_state(bar.close, opens).value if opens else "-"
+            result = await evaluate_and_submit(
+                symbol=symbol,
+                bars_15m=list(_buf(symbol, "15Min")),
+                opens=opens,
+                executor=executor,
+                journal=journal,
+                config=config,
+                now=datetime.now(UTC),
+            )
+            sym_state.last_event = result.outcome.value
+            if result.setup is not None:
+                sym_state.scenario = result.setup.kind.value
+            state.push_event(f"{symbol} {tf} -> {result.outcome.value}")
+            await journal.record_event(
+                "evaluate",
+                symbol=symbol,
+                outcome=result.outcome.value,
+                trade_id=result.trade_id,
+                pattern=result.setup.kind.value if result.setup else None,
+            )
+
+        md.set_bar_handler(on_bar_closed)
+
+        updates = TradeUpdateHandler(settings, journal)
+        stop_event = asyncio.Event()
+
+        bar_task = asyncio.create_task(md.run(config.watchlist), name="bars")
+        updates_task = asyncio.create_task(updates.run(), name="trade_updates")
+        flat_task = asyncio.create_task(
+            force_flat_at_close(executor, journal, config, session_date),
+            name="force_flat",
+        )
+        tui_task = asyncio.create_task(run_tui(state, stop_event), name="tui")
+        tasks = {bar_task, updates_task, flat_task, tui_task}
+
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            state.session_status = "stopping"
+            stop_event.set()
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            for t in tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
+            await journal.record_event("session_end", date=session_date)
+
+
 __all__ = [
     "EvalOutcome",
     "EvaluationResult",
@@ -273,6 +405,12 @@ __all__ = [
     "TradePlan",
     "compute_atr14",
     "evaluate_and_submit",
+    "force_flat_at_close",
     "get_higher_opens",
     "pick_best_setup",
+    "run_session",
 ]
+
+
+# Unused import guard for pyright (timedelta referenced only via re-export)
+_ = timedelta
