@@ -13,7 +13,10 @@ data/trades.db-wal
 data/trades.db-shm
 data/events.jsonl
 data/events.jsonl.*
-reports/
+
+# Per-session daily reports (high churn; keep local).
+# Research outputs under reports/backtest/ and reports/walk-forward/ ARE tracked.
+reports/daily/
 
 # Python
 __pycache__/

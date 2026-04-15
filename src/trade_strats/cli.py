@@ -18,6 +18,7 @@ from trade_strats.journal import Journal
 from trade_strats.market_data import AlpacaSettings, MarketData
 from trade_strats.orchestrator import run_session
 from trade_strats.reconcile import format_report, reconcile
+from trade_strats.reports import save_backtest, save_walk_forward
 
 app = typer.Typer(help="TheStrat 15m trading bot")
 
@@ -169,6 +170,17 @@ def backtest(
         result = run_backtest(symbol, bars_15m, provider, cfg, starting_equity=equity)
         typer.echo("")
         typer.echo(result.summary())
+        json_path, md_path = save_backtest(
+            result,
+            out_dir=cfg.paths.reports_dir / "backtest",
+            symbol=symbol,
+            start=start,
+            end=end,
+            config=cfg,
+        )
+        typer.echo("")
+        typer.echo(f"Saved: {json_path}")
+        typer.echo(f"Saved: {md_path}")
 
     asyncio.run(_go())
 
@@ -208,6 +220,17 @@ def walk_forward_cmd(
         report = run_walk_forward(bars_by_symbol, opens_by_symbol, cfg, starting_equity=equity)
         typer.echo("")
         typer.echo(report.summary())
+        json_path, md_path = save_walk_forward(
+            report,
+            out_dir=cfg.paths.reports_dir / "walk-forward",
+            start=start,
+            end=end,
+            config=cfg,
+            starting_equity=equity,
+        )
+        typer.echo("")
+        typer.echo(f"Saved: {json_path}")
+        typer.echo(f"Saved: {md_path}")
 
     asyncio.run(_go())
 
