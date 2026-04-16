@@ -293,7 +293,7 @@ async def test_not_enough_bars_returns_outcome(executor: Executor, journal: Jour
     bars = _bars_at_price(100.0, count=5)
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=None,
         executor=executor,
         journal=journal,
@@ -308,7 +308,7 @@ async def test_no_setup_on_flat_bars(executor: Executor, journal: Journal) -> No
     # All bars are inside each other (same high/low) → all scenario 1 → no setup
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=90.0, four_hour=90.0, one_hour=90.0),
         executor=executor,
         journal=journal,
@@ -329,7 +329,7 @@ async def test_pattern_filtered_when_config_excludes_kind(
     bars = _setup_322_bullish_sequence()
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=10.0, four_hour=11.0, one_hour=11.5),
         executor=executor,
         journal=journal,
@@ -343,7 +343,7 @@ async def test_ftfc_missing_when_opens_none(executor: Executor, journal: Journal
     bars = _setup_322_bullish_sequence()
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=None,
         executor=executor,
         journal=journal,
@@ -359,7 +359,7 @@ async def test_ftfc_mismatch_on_misaligned_higher_tfs(executor: Executor, journa
     # Price = 12, opens all above → bearish bias → rejects long
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=15.0, four_hour=14.0, one_hour=13.0),
         executor=executor,
         journal=journal,
@@ -380,7 +380,7 @@ async def test_risk_rejected_on_loss_cap(
     now = datetime(2026, 4, 15, 14, 0, tzinfo=ET)
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=10.0, four_hour=11.0, one_hour=11.5),
         executor=executor,
         journal=journal,
@@ -398,7 +398,7 @@ async def test_submitted_happy_path_persists_trade_and_orders(
     now = datetime(2026, 4, 15, 14, 0, tzinfo=ET)
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=10.0, four_hour=11.0, one_hour=11.5),
         executor=executor,
         journal=journal,
@@ -438,7 +438,7 @@ async def test_submitted_writes_entry_event(
     now = datetime(2026, 4, 15, 14, 0, tzinfo=ET)
     await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=10.0, four_hour=11.0, one_hour=11.5),
         executor=executor,
         journal=journal,
@@ -481,7 +481,7 @@ async def test_ftfc_short_bias_triggers_short_submission(
     # Price = 8.0, opens all above → bearish bias → allows short
     result = await evaluate_and_submit(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens=HigherTfOpens(daily=20.0, four_hour=18.0, one_hour=15.0),
         executor=executor,
         journal=journal,

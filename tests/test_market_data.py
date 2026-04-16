@@ -110,7 +110,7 @@ def test_from_env_normalizes_feed_case(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- Timeframe / data-feed mapping ----------------------------------------
 
 
-@pytest.mark.parametrize("tf", ["1Min", "15Min", "1H", "4H", "1D"])
+@pytest.mark.parametrize("tf", ["1Min", "5Min", "10Min", "15Min", "20Min", "30Min", "1H", "4H", "1D"])
 def test_timeframe_supported(tf: str) -> None:
     result = _timeframe(tf)
     assert result is not None
@@ -118,7 +118,7 @@ def test_timeframe_supported(tf: str) -> None:
 
 def test_timeframe_rejects_unknown() -> None:
     with pytest.raises(ValueError, match="unsupported"):
-        _timeframe("30Min")
+        _timeframe("bogus")
 
 
 def test_data_feed_known() -> None:

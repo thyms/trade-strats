@@ -185,7 +185,7 @@ def test_target_hit_closes_trade_at_target() -> None:
     bars_plus = [*bars, trigger_bar]
     result = run_backtest(
         symbol="SPY",
-        bars_15m=bars_plus,
+        signal_bars=bars_plus,
         opens_provider=_opens_long_bias,
         config=_config(),
         starting_equity=50_000.0,
@@ -212,7 +212,7 @@ def test_stop_hit_closes_trade_at_stop() -> None:
     bars_plus = [*bars, trigger_bar]
     result = run_backtest(
         symbol="SPY",
-        bars_15m=bars_plus,
+        signal_bars=bars_plus,
         opens_provider=_opens_long_bias,
         config=_config(),
         starting_equity=50_000.0,
@@ -238,7 +238,7 @@ def test_entry_tif_expires_if_trigger_not_reached() -> None:
     bars_plus = [*bars, no_trigger]
     result = run_backtest(
         symbol="SPY",
-        bars_15m=bars_plus,
+        signal_bars=bars_plus,
         opens_provider=_opens_long_bias,
         config=_config(),
         starting_equity=50_000.0,
@@ -252,7 +252,7 @@ def test_ftfc_mismatch_blocks_entry() -> None:
     # Provide opens ABOVE price → FULL_RED → blocks long
     result = run_backtest(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens_provider=lambda _ts: HigherTfOpens(daily=20.0, four_hour=18.0, one_hour=15.0),
         config=_config(),
         starting_equity=50_000.0,
@@ -264,7 +264,7 @@ def test_no_opens_blocks_entry() -> None:
     bars = _bullish_sequence()
     result = run_backtest(
         symbol="SPY",
-        bars_15m=bars,
+        signal_bars=bars,
         opens_provider=lambda _ts: None,
         config=_config(),
         starting_equity=50_000.0,
@@ -300,7 +300,7 @@ def test_eod_flatten_unclosed_position() -> None:
     bars_plus = [*bars, trigger, *more]
     result = run_backtest(
         symbol="SPY",
-        bars_15m=bars_plus,
+        signal_bars=bars_plus,
         opens_provider=_opens_long_bias,
         config=_config(),
         starting_equity=50_000.0,

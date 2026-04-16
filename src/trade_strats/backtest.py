@@ -152,12 +152,12 @@ def _close_position_at(
 
 def run_backtest(
     symbol: str,
-    bars_15m: Sequence[TimedBar],
+    signal_bars: Sequence[TimedBar],
     opens_provider: OpensProvider,
     config: Config,
     starting_equity: float = 50_000.0,
 ) -> BacktestResult:
-    """Replay 15m bars through the same strategy + risk logic as live, simulating fills.
+    """Replay signal-TF bars through the same strategy + risk logic as live, simulating fills.
 
     Fill simulation: parent orders have 1-bar TIF; exits check stop-then-target
     against each bar's high/low. At end-of-day, remaining positions close at the
@@ -176,13 +176,13 @@ def run_backtest(
     allowed_patterns = set(config.strategy.patterns)
     allowed_sides = set(config.strategy.sides)
 
-    for i, bar in enumerate(bars_15m):
+    for i, bar in enumerate(signal_bars):
         bar_date = bar.ts.date().isoformat()
         if current_date != bar_date:
             # EOD: close anything still open at previous close.
             if open_positions and i > 0:
-                prev_close = bars_15m[i - 1].close
-                prev_ts = bars_15m[i - 1].ts
+                prev_close = signal_bars[i - 1].close
+                prev_ts = signal_bars[i - 1].ts
                 for pos in open_positions:
                     trade = _close_position_at(pos, prev_ts, prev_close, "eod")
                     completed.append(trade)
@@ -239,14 +239,27 @@ def run_backtest(
                 open_positions.append(position)
         pending_brackets = [pb for pb in expired if bar.ts <= pb.submitted_bar_ts]
 
-        window = list(bars_15m[: i + 1])
+        window = list(signal_bars[: i + 1])
         if len(window) < 15:
             continue
         strat_bars = [b.to_strategy_bar() for b in window]
+        all_setups = detect(strat_bars)
+        # When rev-strat is excluded, also suppress 2-2 matches that overlap
+        # with a rev-strat detection (same signal bar, same side).
+        rev_strat_excluded = "rev-strat" not in allowed_patterns
+        rev_strat_sides: set[Side] = (
+            {s.side for s in all_setups if s.kind is PatternKind.REV_STRAT}
+            if rev_strat_excluded
+            else set()
+        )
         setups = [
             s
-            for s in detect(strat_bars)
-            if s.kind.value in allowed_patterns and s.side.value in allowed_sides
+            for s in all_setups
+            if s.kind.value in allowed_patterns
+            and s.side.value in allowed_sides
+            and not (
+                rev_strat_excluded and s.kind is PatternKind.TWO_TWO and s.side in rev_strat_sides
+            )
         ]
         setup = pick_best_setup(setups)
         if setup is None:
@@ -283,8 +296,8 @@ def run_backtest(
             )
         )
 
-    if open_positions and bars_15m:
-        last = bars_15m[-1]
+    if open_positions and signal_bars:
+        last = signal_bars[-1]
         for pos in open_positions:
             trade = _close_position_at(pos, last.ts, last.close, "eod")
             completed.append(trade)
@@ -492,7 +505,7 @@ def run_walk_forward(
             continue
         result = run_backtest(
             symbol=symbol,
-            bars_15m=bars,
+            signal_bars=bars,
             opens_provider=opens_provider,
             config=config,
             starting_equity=starting_equity,

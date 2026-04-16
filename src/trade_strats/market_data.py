@@ -13,16 +13,23 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from trade_strats.aggregation import (
     Aggregator,
+    BucketFn,
     TimedBar,
+    aggregate,
     bucket_1d,
     bucket_1h,
-    bucket_4h,
-    bucket_15m,
+    bucket_minutes,
     is_rth,
+    parse_tf_minutes,
 )
 
 BarHandler = Callable[[str, str, TimedBar], Awaitable[None]]
-AGGREGATED_TIMEFRAMES: tuple[str, ...] = ("15Min", "1H", "4H", "1D")
+
+# Higher timeframes used for FTFC — always aggregated from 1m WS bars.
+_HIGHER_TFS: tuple[str, ...] = ("1H", "4H", "1D")
+
+# Alpaca-native bar sizes that can be fetched directly from the API.
+_ALPACA_NATIVE: set[str] = {"1Min", "5Min", "15Min", "30Min", "1H", "4H", "1D"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +59,7 @@ class AlpacaSettings:
         )
 
 
-SUPPORTED_TIMEFRAMES: tuple[str, ...] = ("1Min", "15Min", "1H", "4H", "1D")
+SUPPORTED_TIMEFRAMES: tuple[str, ...] = ("1Min", "5Min", "15Min", "30Min", "1H", "4H", "1D")
 
 
 def _tf(amount: int, unit: Any) -> TimeFrame:
@@ -62,11 +69,10 @@ def _tf(amount: int, unit: Any) -> TimeFrame:
 
 
 def _timeframe(tf: str) -> TimeFrame:
+    """Map a timeframe string to an Alpaca TimeFrame. Only native Alpaca sizes supported."""
+    if tf.endswith("Min"):
+        return _tf(int(tf[: -len("Min")]), TimeFrameUnit.Minute)
     match tf:
-        case "1Min":
-            return _tf(1, TimeFrameUnit.Minute)
-        case "15Min":
-            return _tf(15, TimeFrameUnit.Minute)
         case "1H":
             return _tf(1, TimeFrameUnit.Hour)
         case "4H":
@@ -77,12 +83,11 @@ def _timeframe(tf: str) -> TimeFrame:
             raise ValueError(f"unsupported timeframe: {tf}")
 
 
-_BUCKET_FNS = {
-    "15Min": bucket_15m,
-    "1H": bucket_1h,
-    "4H": bucket_4h,
-    "1D": bucket_1d,
-}
+def _bucket_fn_for(tf: str) -> BucketFn:
+    """Return the appropriate bucket function for any timeframe string."""
+    if tf == "1D":
+        return bucket_1d
+    return bucket_minutes(parse_tf_minutes(tf))
 
 
 def _to_timed_bar(alpaca_bar: Any) -> TimedBar:
@@ -108,16 +113,35 @@ class MarketData:
     """Thin wrapper around alpaca-py historical + streaming bar data.
 
     Ingests 1m WS bars and routes them through per-symbol aggregators for
-    15m / 1H / 4H / 1D, firing a single async callback on every completed bar.
+    the strategy timeframe + higher TFs (1H / 4H / 1D), firing a single
+    async callback on every completed bar.
     Does not auto-reconnect — caller wraps `run()` with retry if desired.
     """
 
-    def __init__(self, settings: AlpacaSettings) -> None:
+    def __init__(self, settings: AlpacaSettings, strategy_tf: str = "15Min") -> None:
         self._settings = settings
+        self._strategy_tf = strategy_tf
         self._handler: BarHandler | None = None
         self._aggregators: dict[str, dict[str, Aggregator]] = {}
         self._historical: StockHistoricalDataClient | None = None
         self._stream: StockDataStream | None = None
+
+        # Build the set of timeframes to aggregate from 1m bars.
+        # Always includes the strategy TF + the higher TFs for FTFC.
+        seen: set[str] = set()
+        agg_tfs: list[str] = []
+        for tf in (strategy_tf, *_HIGHER_TFS):
+            if tf not in seen:
+                seen.add(tf)
+                agg_tfs.append(tf)
+        self._aggregated_timeframes: tuple[str, ...] = tuple(agg_tfs)
+        self._bucket_fns: dict[str, BucketFn] = {
+            tf: _bucket_fn_for(tf) for tf in self._aggregated_timeframes
+        }
+
+    @property
+    def strategy_tf(self) -> str:
+        return self._strategy_tf
 
     def set_bar_handler(self, handler: BarHandler) -> None:
         self._handler = handler
@@ -125,7 +149,7 @@ class MarketData:
     def _agg_for(self, symbol: str) -> dict[str, Aggregator]:
         if symbol not in self._aggregators:
             self._aggregators[symbol] = {
-                tf: Aggregator(_BUCKET_FNS[tf]) for tf in AGGREGATED_TIMEFRAMES
+                tf: Aggregator(self._bucket_fns[tf]) for tf in self._aggregated_timeframes
             }
         return self._aggregators[symbol]
 
@@ -141,7 +165,7 @@ class MarketData:
         if not is_rth(bar.ts):
             return
         aggs = self._agg_for(symbol)
-        for tf in AGGREGATED_TIMEFRAMES:
+        for tf in self._aggregated_timeframes:
             for completed in aggs[tf].ingest(bar):
                 if self._handler is not None:
                     await self._handler(symbol, tf, completed)
@@ -151,7 +175,7 @@ class MarketData:
         aggs = self._aggregators.get(symbol)
         if aggs is None:
             return
-        for tf in AGGREGATED_TIMEFRAMES:
+        for tf in self._aggregated_timeframes:
             for completed in aggs[tf].flush():
                 if self._handler is not None:
                     await self._handler(symbol, tf, completed)
@@ -168,13 +192,14 @@ class MarketData:
             )
         return self._historical
 
-    async def backfill(
+    async def _fetch_bars(
         self,
         symbol: str,
         timeframe: str,
         start: datetime,
         end: datetime,
     ) -> list[TimedBar]:
+        """Fetch bars directly from Alpaca for a native timeframe."""
         client = self._historical_client()
         request = StockBarsRequest(
             symbol_or_symbols=symbol,
@@ -188,6 +213,20 @@ class MarketData:
             bar_set.data.get(symbol, [])  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownArgumentType]
         )
         return [_to_timed_bar(b) for b in raw]
+
+    async def backfill(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[TimedBar]:
+        """Fetch historical bars. Non-native Alpaca TFs are built from 1m bars."""
+        if timeframe in _ALPACA_NATIVE:
+            return await self._fetch_bars(symbol, timeframe, start, end)
+        # Non-native: fetch 1m and aggregate locally
+        one_min = await self._fetch_bars(symbol, "1Min", start, end)
+        return aggregate(one_min, _bucket_fn_for(timeframe))
 
     async def run(self, symbols: Sequence[str]) -> None:
         """Subscribe to 1m WS bars and stream forever. Cancel the task to stop."""

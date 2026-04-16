@@ -52,16 +52,35 @@ def _bucket_by_minutes(t: datetime, minutes: int) -> datetime:
     return day_open + timedelta(minutes=bucket_min)
 
 
-def bucket_15m(t: datetime) -> datetime:
-    return _bucket_by_minutes(t, 15)
+def bucket_minutes(n: int) -> BucketFn:
+    """Return a bucket function for an arbitrary N-minute interval."""
+    if n <= 0:
+        raise ValueError(f"bucket size must be positive, got {n}")
+
+    def _bucket(t: datetime) -> datetime:
+        return _bucket_by_minutes(t, n)
+
+    return _bucket
 
 
-def bucket_1h(t: datetime) -> datetime:
-    return _bucket_by_minutes(t, 60)
+def parse_tf_minutes(tf: str) -> int:
+    """Extract the minute count from a timeframe string like '15Min', '1H', '4H', '1D'.
+
+    Returns the equivalent number of intraday minutes (1D → 390 = 6.5h RTH).
+    """
+    if tf.endswith("Min"):
+        return int(tf[: -len("Min")])
+    if tf.endswith("H"):
+        return int(tf[: -len("H")]) * 60
+    if tf == "1D":
+        return 390  # 6.5 hours of RTH
+    raise ValueError(f"cannot parse timeframe: {tf}")
 
 
-def bucket_4h(t: datetime) -> datetime:
-    return _bucket_by_minutes(t, 240)
+# Convenience aliases used across the codebase
+bucket_15m = bucket_minutes(15)
+bucket_1h = bucket_minutes(60)
+bucket_4h = bucket_minutes(240)
 
 
 def bucket_1d(t: datetime) -> datetime:

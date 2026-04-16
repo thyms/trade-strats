@@ -153,13 +153,13 @@ async def _fetch_for_backtest(
     end: datetime,
     cache_dir: Path = DEFAULT_BAR_CACHE,
 ) -> tuple[list[TimedBar], list[TimedBar], list[TimedBar], list[TimedBar]]:
-    """Fetch 15m + 1H + 1D from Alpaca (or local cache); locally aggregate 4H from 1H."""
+    """Fetch signal-TF + 1H + 1D from Alpaca (or local cache); locally aggregate 4H from 1H."""
     context_start = start - timedelta(days=30)
-    bars_15m = await _fetch_or_cache(md, cache_dir, symbol, "15Min", start, end)
+    signal_bars = await _fetch_or_cache(md, cache_dir, symbol, md.strategy_tf, start, end)
     daily = await _fetch_or_cache(md, cache_dir, symbol, "1D", context_start, end)
     one_hour = await _fetch_or_cache(md, cache_dir, symbol, "1H", context_start, end)
     four_hour = aggregate(one_hour, bucket_4h)
-    return bars_15m, daily, four_hour, one_hour
+    return signal_bars, daily, four_hour, one_hour
 
 
 @app.command()
@@ -180,20 +180,21 @@ def backtest(
 
     async def _go() -> None:
         settings = AlpacaSettings.from_env()
-        md = MarketData(settings)
-        typer.echo(f"Fetching {symbol} bars from {start} to {end}...")
-        bars_15m, daily, four_hour, one_hour = await _fetch_for_backtest(
+        stf = cfg.strategy.timeframe
+        md = MarketData(settings, strategy_tf=stf)
+        typer.echo(f"Fetching {symbol} {stf} bars from {start} to {end}...")
+        signal_bars, daily, four_hour, one_hour = await _fetch_for_backtest(
             md, symbol, start_dt, end_dt
         )
         typer.echo(
-            f"Fetched: {len(bars_15m)} 15m, {len(daily)} 1D, "
+            f"Fetched: {len(signal_bars)} {stf}, {len(daily)} 1D, "
             f"{len(four_hour)} 4H (aggregated), {len(one_hour)} 1H"
         )
-        if not bars_15m:
-            typer.echo("No 15m bars in range.", err=True)
+        if not signal_bars:
+            typer.echo(f"No {stf} bars in range.", err=True)
             raise typer.Exit(code=1)
         provider = build_opens_provider(daily, four_hour, one_hour)
-        result = run_backtest(symbol, bars_15m, provider, cfg, starting_equity=equity)
+        result = run_backtest(symbol, signal_bars, provider, cfg, starting_equity=equity)
         typer.echo("")
         typer.echo(result.summary())
         json_path, md_path = save_backtest(
@@ -229,18 +230,19 @@ def walk_forward_cmd(
 
     async def _go() -> None:
         settings = AlpacaSettings.from_env()
-        md = MarketData(settings)
+        stf = cfg.strategy.timeframe
+        md = MarketData(settings, strategy_tf=stf)
         bars_by_symbol: dict[str, list[TimedBar]] = {}
         opens_by_symbol: dict[str, OpensProvider] = {}
         for symbol in cfg.watchlist:
             typer.echo(f"Fetching {symbol}...")
-            bars_15m, daily, four_hour, one_hour = await _fetch_for_backtest(
+            signal_bars, daily, four_hour, one_hour = await _fetch_for_backtest(
                 md, symbol, start_dt, end_dt
             )
-            if not bars_15m:
-                typer.echo(f"  {symbol}: no 15m bars, skipping", err=True)
+            if not signal_bars:
+                typer.echo(f"  {symbol}: no {stf} bars, skipping", err=True)
                 continue
-            bars_by_symbol[symbol] = bars_15m
+            bars_by_symbol[symbol] = signal_bars
             opens_by_symbol[symbol] = build_opens_provider(daily, four_hour, one_hour)
         if not bars_by_symbol:
             typer.echo("No data fetched for any symbol.", err=True)

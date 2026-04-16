@@ -84,10 +84,22 @@ def get_higher_opens(md: MarketData, symbol: str) -> HigherTfOpens | None:
     return HigherTfOpens(daily=daily, four_hour=four_hour, one_hour=one_hour)
 
 
-def _filter_by_config(setups: Sequence[Setup], config: Config) -> list[Setup]:
+def _filter_by_config(all_setups: Sequence[Setup], config: Config) -> list[Setup]:
     allowed_patterns = set(config.strategy.patterns)
     allowed_sides = set(config.strategy.sides)
-    return [s for s in setups if s.kind.value in allowed_patterns and s.side.value in allowed_sides]
+    filtered = [
+        s for s in all_setups if s.kind.value in allowed_patterns and s.side.value in allowed_sides
+    ]
+    # When rev-strat is excluded from config, also suppress any 2-2 match
+    # that overlaps with a rev-strat detection on the same signal bar.
+    # Without this, the 2-2 detector fires on the last two bars of every
+    # 1-2-2 sequence, making the config exclusion a no-op relabel.
+    if "rev-strat" not in allowed_patterns:
+        rev_strat_sides = {s.side for s in all_setups if s.kind is PatternKind.REV_STRAT}
+        filtered = [
+            s for s in filtered if not (s.kind is PatternKind.TWO_TWO and s.side in rev_strat_sides)
+        ]
+    return filtered
 
 
 async def _persist_bracket(
@@ -164,18 +176,18 @@ async def _persist_bracket(
 
 async def evaluate_and_submit(
     symbol: str,
-    bars_15m: Sequence[TimedBar],
+    signal_bars: Sequence[TimedBar],
     opens: HigherTfOpens | None,
     executor: Executor,
     journal: Journal,
     config: Config,
     now: datetime,
 ) -> EvaluationResult:
-    """Run the full decision chain on a just-closed 15m bar and submit if approved."""
-    if len(bars_15m) < _MIN_BARS_FOR_ATR:
+    """Run the full decision chain on a just-closed signal-TF bar and submit if approved."""
+    if len(signal_bars) < _MIN_BARS_FOR_ATR:
         return EvaluationResult(outcome=EvalOutcome.NOT_ENOUGH_BARS, symbol=symbol)
 
-    strat_bars = [b.to_strategy_bar() for b in bars_15m]
+    strat_bars = [b.to_strategy_bar() for b in signal_bars]
     all_setups = detect(strat_bars)
     if not all_setups:
         return EvaluationResult(outcome=EvalOutcome.NO_SETUP, symbol=symbol)
@@ -190,7 +202,7 @@ async def evaluate_and_submit(
     if opens is None:
         return EvaluationResult(outcome=EvalOutcome.FTFC_MISSING, symbol=symbol, setup=setup)
 
-    last_price = bars_15m[-1].close
+    last_price = signal_bars[-1].close
     state = ftfc_state(last_price, opens)
     if not allows(setup.side, state):
         return EvaluationResult(
@@ -200,7 +212,7 @@ async def evaluate_and_submit(
             ftfc_state=state,
         )
 
-    atr = compute_atr14(bars_15m)
+    atr = compute_atr14(signal_bars)
     account = await executor.get_account()
     session_date = now.astimezone(ET).date().isoformat()
     session = await journal.get_session(session_date)
@@ -303,7 +315,7 @@ async def force_flat_at_close(
 async def run_session(config: Config, schema_path: Path) -> None:
     """Top-level entry point: reconcile, start session, run streams until EOD or cancelled."""
     settings = AlpacaSettings.from_env()
-    md = MarketData(settings)
+    md = MarketData(settings, strategy_tf=config.strategy.timeframe)
     executor = Executor(settings)
 
     journal = await Journal.open(
@@ -341,17 +353,19 @@ async def run_session(config: Config, schema_path: Path) -> None:
                 buffers[key] = deque(maxlen=50)
             return buffers[key]
 
+        stf = config.strategy.timeframe
+
         async def on_bar_closed(symbol: str, tf: str, bar: TimedBar) -> None:
             _buf(symbol, tf).append(bar)
             sym_state = state.upsert_symbol(symbol)
             sym_state.last_price = bar.close
-            if tf != "15Min":
+            if tf != stf:
                 return
             opens = get_higher_opens(md, symbol)
             sym_state.ftfc = ftfc_state(bar.close, opens).value if opens else "-"
             result = await evaluate_and_submit(
                 symbol=symbol,
-                bars_15m=list(_buf(symbol, "15Min")),
+                signal_bars=list(_buf(symbol, stf)),
                 opens=opens,
                 executor=executor,
                 journal=journal,
