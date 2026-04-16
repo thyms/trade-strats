@@ -6,6 +6,7 @@ import typer
 from dotenv import load_dotenv
 
 from trade_strats.aggregation import TimedBar, aggregate, bucket_4h
+from trade_strats import bar_cache
 from trade_strats.backtest import (
     OpensProvider,
     build_opens_provider,
@@ -125,14 +126,38 @@ def _parse_date(value: str) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
+DEFAULT_BAR_CACHE = Path("data/bars")
+
+
+async def _fetch_or_cache(
+    md: MarketData,
+    cache_dir: Path,
+    symbol: str,
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+) -> list[TimedBar]:
+    """Return bars from the local Parquet cache, falling back to Alpaca."""
+    cached = bar_cache.load(cache_dir, symbol, timeframe, start, end)
+    if cached is not None:
+        return cached
+    bars = await md.backfill(symbol, timeframe, start, end)
+    bar_cache.save(cache_dir, symbol, timeframe, start, end, bars)
+    return bars
+
+
 async def _fetch_for_backtest(
-    md: MarketData, symbol: str, start: datetime, end: datetime
+    md: MarketData,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    cache_dir: Path = DEFAULT_BAR_CACHE,
 ) -> tuple[list[TimedBar], list[TimedBar], list[TimedBar], list[TimedBar]]:
-    """Fetch 15m + 1H + 1D from Alpaca; locally aggregate 4H from 1H."""
+    """Fetch 15m + 1H + 1D from Alpaca (or local cache); locally aggregate 4H from 1H."""
     context_start = start - timedelta(days=30)
-    bars_15m = await md.backfill(symbol, "15Min", start, end)
-    daily = await md.backfill(symbol, "1D", context_start, end)
-    one_hour = await md.backfill(symbol, "1H", context_start, end)
+    bars_15m = await _fetch_or_cache(md, cache_dir, symbol, "15Min", start, end)
+    daily = await _fetch_or_cache(md, cache_dir, symbol, "1D", context_start, end)
+    one_hour = await _fetch_or_cache(md, cache_dir, symbol, "1H", context_start, end)
     four_hour = aggregate(one_hour, bucket_4h)
     return bars_15m, daily, four_hour, one_hour
 
