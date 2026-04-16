@@ -4,6 +4,8 @@ Running record of backtest experiments, findings, and next steps.
 Updated after each meaningful research run. Raw data lives alongside
 in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
+**Ordering: newest entries first.** Add new sessions above the previous one.
+
 ---
 
 ## 2026-04-15 — Initial backtest battery
