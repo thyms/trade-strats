@@ -6,8 +6,12 @@ import typer
 from dotenv import load_dotenv
 
 from trade_strats import bar_cache
-from trade_strats.aggregation import TimedBar, aggregate, bucket_4h
-from trade_strats.market_data import bucket_fn_for
+from trade_strats.aggregation import (
+    TimedBar,
+    aggregate_df,
+    df_to_bars,
+    parse_tf_minutes,
+)
 from trade_strats.backtest import (
     OpensProvider,
     build_opens_provider,
@@ -130,40 +134,29 @@ def _parse_date(value: str) -> datetime:
 DEFAULT_BAR_CACHE = Path("data/bars")
 
 
-async def _ensure_1m_cached(
+async def _ensure_1m_cached_df(
     md: MarketData,
     cache_dir: Path,
     symbol: str,
     start: datetime,
     end: datetime,
-) -> list[TimedBar]:
-    """Return 1m bars for the date range, fetching uncached days from Alpaca.
+) -> "pd.DataFrame":
+    """Return 1m bars as a DataFrame, fetching uncached months from Alpaca."""
+    import pandas as pd  # noqa: F811 — deferred import for type hint
 
-    Fetches the entire range on first miss; subsequent calls with overlapping
-    ranges only fetch the missing prefix/suffix.
-    """
     start_date = start.astimezone(UTC).date()
     end_date = end.astimezone(UTC).date()
-    already = bar_cache.cached_dates(cache_dir, symbol, start_date, end_date)
 
-    if not already:
-        fetched = await md.backfill(symbol, "1Min", start, end)
+    for mk in bar_cache.missing_months(cache_dir, symbol, start_date, end_date):
+        first, last = bar_cache.month_date_range(mk)
+        month_start = datetime(first.year, first.month, first.day, tzinfo=UTC)
+        month_end = datetime(last.year, last.month, last.day, 23, 59, 59, tzinfo=UTC)
+        typer.echo(f"  Fetching {symbol} 1Min {mk}...")
+        fetched = await md.backfill(symbol, "1Min", month_start, month_end)
         if fetched:
-            bar_cache.save_bars(cache_dir, symbol, fetched)
-    else:
-        earliest, latest = min(already), max(already)
-        if start_date < earliest:
-            before = start.replace(year=earliest.year, month=earliest.month, day=earliest.day)
-            fetched = await md.backfill(symbol, "1Min", start, before)
-            if fetched:
-                bar_cache.save_bars(cache_dir, symbol, fetched)
-        if end_date > latest:
-            after = end.replace(year=latest.year, month=latest.month, day=latest.day)
-            fetched = await md.backfill(symbol, "1Min", after, end)
-            if fetched:
-                bar_cache.save_bars(cache_dir, symbol, fetched)
+            bar_cache.save_month(cache_dir, symbol, mk, fetched)
 
-    return bar_cache.load_days(cache_dir, symbol, start_date, end_date)
+    return bar_cache.load_range_df(cache_dir, symbol, start_date, end_date)
 
 
 async def _fetch_for_backtest(
@@ -176,15 +169,16 @@ async def _fetch_for_backtest(
     """Cache 1m bars, then aggregate to signal-TF + 1H + 4H + 1D locally."""
     context_start = start - timedelta(days=30)
 
-    # Cache 1m bars for the signal range and the context range (for FTFC opens).
-    one_min_signal = await _ensure_1m_cached(md, cache_dir, symbol, start, end)
-    one_min_context = await _ensure_1m_cached(md, cache_dir, symbol, context_start, end)
+    # Load 1m bars as DataFrames (fast parquet read, no TimedBar construction).
+    df_signal = await _ensure_1m_cached_df(md, cache_dir, symbol, start, end)
+    df_context = await _ensure_1m_cached_df(md, cache_dir, symbol, context_start, end)
 
-    # Aggregate from 1m to every timeframe needed.
-    signal_bars = aggregate(one_min_signal, bucket_fn_for(md.strategy_tf))
-    daily = aggregate(one_min_context, bucket_fn_for("1D"))
-    one_hour = aggregate(one_min_context, bucket_fn_for("1H"))
-    four_hour = aggregate(one_hour, bucket_4h)
+    # Aggregate in pandas (vectorized), then convert to TimedBar at the end.
+    stf_minutes = parse_tf_minutes(md.strategy_tf)
+    signal_bars = df_to_bars(aggregate_df(df_signal, stf_minutes))
+    daily = df_to_bars(aggregate_df(df_context, 390))
+    one_hour = df_to_bars(aggregate_df(df_context, 60))
+    four_hour = df_to_bars(aggregate_df(df_context, 240))
     return signal_bars, daily, four_hour, one_hour
 
 

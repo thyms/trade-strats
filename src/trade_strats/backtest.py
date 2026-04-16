@@ -239,10 +239,11 @@ def run_backtest(
                 open_positions.append(position)
         pending_brackets = [pb for pb in expired if bar.ts <= pb.submitted_bar_ts]
 
-        window = list(signal_bars[: i + 1])
-        if len(window) < 15:
+        if i < 14:
             continue
-        strat_bars = [b.to_strategy_bar() for b in window]
+        # detect() only needs last 4 bars; ATR needs last 15.
+        recent = signal_bars[max(0, i - 14) : i + 1]
+        strat_bars = [b.to_strategy_bar() for b in recent]
         all_setups = detect(strat_bars)
         # When rev-strat is excluded, also suppress 2-2 matches that overlap
         # with a rev-strat detection (same signal bar, same side).
@@ -272,7 +273,7 @@ def run_backtest(
         if not allows(setup.side, state):
             continue
 
-        atr = compute_atr14(window)
+        atr = compute_atr14(recent)
         snapshot = AccountSnapshot(
             equity_usd=equity,
             realized_pnl_today=realized_pnl_day,

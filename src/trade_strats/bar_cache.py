@@ -1,17 +1,16 @@
 """Parquet-based local cache for 1-minute bar data.
 
-Only 1Min bars are stored on disk — one file per symbol per trading day.
+Only 1Min bars are stored on disk — one file per symbol per calendar month.
 Higher timeframes are aggregated on the fly from the cached 1m bars,
 so changing the strategy timeframe never requires re-fetching.
 
 Layout::
 
-    data/bars/<SYMBOL>/1Min/<YYYYMMDD>/data.parquet
+    data/bars/<SYMBOL>/1Min/<YYYY-MM>.parquet
 """
 
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -20,30 +19,47 @@ import pandas as pd
 from trade_strats.aggregation import ET, TimedBar
 
 
-def _day_dir(cache_dir: Path, symbol: str, trading_date: date) -> Path:
-    return cache_dir / symbol.upper() / "1Min" / trading_date.strftime("%Y%m%d")
+def _month_key(d: date) -> str:
+    """Return 'YYYY-MM' for a date."""
+    return f"{d.year:04d}-{d.month:02d}"
 
 
-def _day_path(cache_dir: Path, symbol: str, trading_date: date) -> Path:
-    return _day_dir(cache_dir, symbol, trading_date) / "data.parquet"
+def _month_path(cache_dir: Path, symbol: str, month_key: str) -> Path:
+    return cache_dir / symbol.upper() / "1Min" / f"{month_key}.parquet"
 
 
-def _trading_date(bar: TimedBar) -> date:
-    """Return the ET calendar date for a bar (its trading day)."""
-    return bar.ts.astimezone(ET).date()
+def _months_in_range(start: date, end: date) -> list[str]:
+    """Return every distinct 'YYYY-MM' that overlaps [start, end]."""
+    months: list[str] = []
+    d = start.replace(day=1)
+    while d <= end:
+        months.append(_month_key(d))
+        # Advance to the first day of the next month.
+        if d.month == 12:
+            d = d.replace(year=d.year + 1, month=1)
+        else:
+            d = d.replace(month=d.month + 1)
+    return months
 
 
 def _bars_from_df(df: pd.DataFrame) -> list[TimedBar]:
+    """Convert a DataFrame to a list of TimedBar using vectorized column access."""
+    ts_list = df["ts"].dt.to_pydatetime().tolist()
+    open_list = df["open"].to_numpy()
+    high_list = df["high"].to_numpy()
+    low_list = df["low"].to_numpy()
+    close_list = df["close"].to_numpy()
+    vol_list = df["volume"].to_numpy()
     return [
         TimedBar(
-            ts=row["ts"].to_pydatetime(),
-            open=float(row["open"]),
-            high=float(row["high"]),
-            low=float(row["low"]),
-            close=float(row["close"]),
-            volume=int(row["volume"]),
+            ts=ts_list[i],
+            open=float(open_list[i]),
+            high=float(high_list[i]),
+            low=float(low_list[i]),
+            close=float(close_list[i]),
+            volume=int(vol_list[i]),
         )
-        for _, row in df.iterrows()
+        for i in range(len(df))
     ]
 
 
@@ -63,48 +79,68 @@ def _df_from_bars(bars: list[TimedBar]) -> pd.DataFrame:
     )
 
 
-def _calendar_dates(start: date, end: date) -> list[date]:
-    """Return every calendar date in [start, end] inclusive."""
-    days: list[date] = []
-    d = start
-    while d <= end:
-        days.append(d)
-        d += timedelta(days=1)
-    return days
-
-
-def cached_dates(cache_dir: Path, symbol: str, start: date, end: date) -> set[date]:
-    """Return the set of trading dates that already have cached 1m bars."""
-    found: set[date] = set()
-    for d in _calendar_dates(start, end):
-        if _day_path(cache_dir, symbol, d).exists():
-            found.add(d)
+def cached_months(cache_dir: Path, symbol: str, start: date, end: date) -> set[str]:
+    """Return the set of month keys that already have cached 1m bars."""
+    found: set[str] = set()
+    for mk in _months_in_range(start, end):
+        if _month_path(cache_dir, symbol, mk).exists():
+            found.add(mk)
     return found
 
 
-def load_days(
+def missing_months(cache_dir: Path, symbol: str, start: date, end: date) -> list[str]:
+    """Return month keys in the range that do NOT have a cached parquet file."""
+    already = cached_months(cache_dir, symbol, start, end)
+    return [mk for mk in _months_in_range(start, end) if mk not in already]
+
+
+def load_range_df(
+    cache_dir: Path, symbol: str, start: date, end: date
+) -> pd.DataFrame:
+    """Load and concatenate cached 1m bars as a DataFrame.
+
+    Bars outside [start, end] are trimmed so callers get exactly the range
+    they asked for.
+    """
+    dfs: list[pd.DataFrame] = []
+    for mk in _months_in_range(start, end):
+        path = _month_path(cache_dir, symbol, mk)
+        if path.exists():
+            dfs.append(pd.read_parquet(path))
+    if not dfs:
+        return pd.DataFrame(columns=["ts", "open", "high", "low", "close", "volume"])
+    df = pd.concat(dfs, ignore_index=True)
+    # Trim to requested range (monthly files may contain bars outside it).
+    start_dt = pd.Timestamp(start, tz=ET)
+    end_dt = pd.Timestamp(end, tz=ET) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+    mask = (df["ts"] >= start_dt) & (df["ts"] <= end_dt)
+    return df[mask].reset_index(drop=True)
+
+
+def load_range(
     cache_dir: Path, symbol: str, start: date, end: date
 ) -> list[TimedBar]:
-    """Load and concatenate all cached 1m bars for trading days in [start, end]."""
-    bars: list[TimedBar] = []
-    for d in _calendar_dates(start, end):
-        path = _day_path(cache_dir, symbol, d)
-        if path.exists():
-            df = pd.read_parquet(path)
-            bars.extend(_bars_from_df(df))
-    return bars
+    """Load cached 1m bars as TimedBar list. Prefer load_range_df for batch work."""
+    df = load_range_df(cache_dir, symbol, start, end)
+    return _bars_from_df(df)
 
 
-def save_bars(cache_dir: Path, symbol: str, bars: list[TimedBar]) -> list[Path]:
-    """Split bars by trading day and write one parquet per day. Returns paths written."""
-    by_day: dict[date, list[TimedBar]] = defaultdict(list)
-    for b in bars:
-        by_day[_trading_date(b)].append(b)
+def save_month(
+    cache_dir: Path, symbol: str, month_key: str, bars: list[TimedBar]
+) -> Path:
+    """Write bars for a single month to its parquet file."""
+    path = _month_path(cache_dir, symbol, month_key)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _df_from_bars(bars).to_parquet(path, index=False)
+    return path
 
-    paths: list[Path] = []
-    for trading_day, day_bars in sorted(by_day.items()):
-        path = _day_path(cache_dir, symbol, trading_day)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _df_from_bars(day_bars).to_parquet(path, index=False)
-        paths.append(path)
-    return paths
+
+def month_date_range(month_key: str) -> tuple[date, date]:
+    """Return (first_day, last_day) for a 'YYYY-MM' key."""
+    year, month = (int(x) for x in month_key.split("-"))
+    first = date(year, month, 1)
+    if month == 12:
+        last = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last = date(year, month + 1, 1) - timedelta(days=1)
+    return first, last

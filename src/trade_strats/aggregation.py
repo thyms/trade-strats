@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+import numpy as np
+import pandas as pd
+
 from trade_strats.strategy.labeler import Bar
 
 ET = ZoneInfo("America/New_York")
@@ -177,10 +180,114 @@ class Aggregator:
 
 
 def aggregate(bars: Iterable[TimedBar], bucket_fn: BucketFn) -> list[TimedBar]:
-    """Run bars through a fresh Aggregator and flush at the end."""
+    """Run bars through a fresh Aggregator and flush at the end.
+
+    Pre-/post-market bars are filtered out automatically so callers
+    don't need to worry about non-RTH data from the API.
+    """
     agg = Aggregator(bucket_fn)
     out: list[TimedBar] = []
     for bar in bars:
+        if not is_rth(bar.ts):
+            continue
         out.extend(agg.ingest(bar))
     out.extend(agg.flush())
     return out
+
+
+# ---------------------------------------------------------------------------
+# Fast pandas-native aggregation for batch processing
+# ---------------------------------------------------------------------------
+
+
+def _bucket_key_minutes(ts_series: pd.Series, minutes: int) -> pd.Series:  # type: ignore[type-arg]
+    """Assign an integer bucket key to each bar for fast groupby.
+
+    Returns an int Series where each value encodes (date_ordinal, bucket_offset).
+    """
+    et = ts_series.dt.tz_convert(ET)
+    ymd = et.dt.year * 10000 + et.dt.month * 100 + et.dt.day
+    mins_since_open = (et.dt.hour - 9) * 60 + (et.dt.minute - 30)
+    bucket_offset = (mins_since_open // minutes) * minutes
+    return ymd * 1000 + bucket_offset
+
+
+def aggregate_df(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """Aggregate a 1Min DataFrame to N-minute bars using pandas groupby.
+
+    Input df must have columns: ts, open, high, low, close, volume.
+    The ts column must be timezone-aware. Non-RTH bars are filtered.
+    Returns a DataFrame with the same columns, sorted by ts.
+    """
+    if df.empty:
+        return df
+
+    # Ensure ts is datetime
+    if not pd.api.types.is_datetime64_any_dtype(df["ts"]):
+        df = df.copy()
+        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+
+    # Convert to ET once and reuse
+    et_all = df["ts"].dt.tz_convert(ET)
+
+    # Filter to RTH only (vectorized via hour/minute math)
+    minutes_of_day = et_all.dt.hour * 60 + et_all.dt.minute
+    rth_open_min = 9 * 60 + 30   # 09:30
+    rth_close_min = 16 * 60       # 16:00
+    mask = (minutes_of_day >= rth_open_min) & (minutes_of_day < rth_close_min)
+    df = df[mask]
+
+    if df.empty:
+        return df
+
+    # Reuse the ET-converted series (filtered)
+    et = et_all[mask]
+    ymd = et.dt.year * 10000 + et.dt.month * 100 + et.dt.day
+    if minutes >= 390:
+        bucket_key = ymd
+    else:
+        mins_since_open = (et.dt.hour - 9) * 60 + (et.dt.minute - 30)
+        bucket_offset = (mins_since_open // minutes) * minutes
+        bucket_key = ymd * 1000 + bucket_offset
+
+    grouped = df.groupby(bucket_key).agg(
+        ts=("ts", "first"),  # first bar's timestamp as the bucket ts
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).reset_index(drop=True)
+
+    # Reconstruct proper bucket-start timestamps from the first bar in each group
+    if minutes < 390:
+        get = grouped["ts"].dt.tz_convert(ET)
+        mins_since_open = (get.dt.hour - 9) * 60 + (get.dt.minute - 30)
+        aligned_offset = (mins_since_open // minutes) * minutes
+        delta = aligned_offset - mins_since_open  # always <= 0
+        grouped["ts"] = grouped["ts"] + pd.to_timedelta(delta, unit="min")
+
+    return grouped.sort_values("ts").reset_index(drop=True)
+
+
+def df_to_bars(df: pd.DataFrame) -> list[TimedBar]:
+    """Convert a DataFrame with ts/open/high/low/close/volume to TimedBar list."""
+    if df.empty:
+        return []
+    ts_list = df["ts"].dt.to_pydatetime().tolist()
+    opens = df["open"].to_numpy()
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    closes = df["close"].to_numpy()
+    vols = df["volume"].to_numpy()
+    return [
+        TimedBar(
+            ts=ts_list[i],
+            open=float(opens[i]),
+            high=float(highs[i]),
+            low=float(lows[i]),
+            close=float(closes[i]),
+            volume=int(vols[i]),
+        )
+        for i in range(len(df))
+    ]

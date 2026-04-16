@@ -8,6 +8,67 @@ in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
 ---
 
+## 2026-04-16 — 7-year walk-forward baseline
+
+### Full history: 7-year walk-forward (2019-04-16 to 2026-04-16)
+
+**Config:** all 4 patterns, both sides, 3R min, 0.5 ATR filter, $50k per symbol.
+**File:** `walk-forward/2019-04-16_to_2026-04-16_run-2026-04-16.json`
+
+| Symbol | Trades | Win % | PnL | PF |
+|--------|-------:|------:|----:|---:|
+| SPY | 1,092 | 36.9% | +$9,709 | 1.05 |
+| QQQ | 1,104 | 39.7% | +$20,536 | 1.11 |
+| AAPL | 1,046 | 37.9% | +$1,882 | 1.01 |
+| NVDA | 1,065 | 44.3% | +$53,538 | **1.25** |
+| TSLA | 1,046 | 45.0% | +$86,416 | **1.40** |
+| **Total** | **5,353** | | **+$172,081** | |
+
+Total capital: $250k (5 × $50k independent pools).
+**Return: ~68.8% over 7 years (~7.7% annualized).**
+Comparable to buy-and-hold S&P (~10-12% annualized over same period),
+but the strategy is intraday-only (flat overnight).
+
+### Pattern-level observations (7y)
+
+| Symbol | 2-2 PF | 3-1-2 PF | 3-2-2 PF | rev-strat PF |
+|--------|-------:|---------:|---------:|-------------:|
+| SPY | 1.13 | **0.78** | **0.57** | 1.20 |
+| QQQ | 1.08 | 1.32 | 1.12 | 1.06 |
+| AAPL | 1.00 | 1.12 | **0.70** | 1.12 |
+| NVDA | 1.14 | **1.82** | 0.90 | **1.52** |
+| TSLA | **1.50** | **1.56** | 0.96 | 1.04 |
+
+- **3-2-2 is a consistent loser** — negative on SPY (PF 0.57), AAPL (0.70),
+  NVDA (0.90), TSLA (0.96). Only QQQ is barely positive (1.12). Too few
+  trades (46-70 per symbol) to be statistically meaningful, but the
+  direction is consistent. Strong candidate for removal.
+- **3-1-2 is polarized** — excellent on NVDA (1.82) and TSLA (1.56), but
+  terrible on SPY (0.78). Symbol-dependent edge.
+- **2-2 is the workhorse** — 63-72% of all trades per symbol. Consistently
+  positive except AAPL (exactly 1.00). TSLA 2-2 at PF 1.50 is remarkable.
+- **rev-strat works best on NVDA** (PF 1.52), mediocre elsewhere.
+
+### Infrastructure improvements
+
+- **Parquet bar cache:** 1Min bars now cached as monthly parquet files in
+  `data/bars/<SYM>/1Min/<YYYY-MM>.parquet`. 350 files, 65 MB total for
+  5 tickers × 7 years. Subsequent runs skip the API entirely.
+- **Parameterized timeframe:** `config.strategy.timeframe` now drives all
+  behavior. Non-native Alpaca intervals (10Min, 20Min) supported via
+  local aggregation from cached 1m bars.
+
+### Key findings
+
+- Strategy is profitable but underperforms buy-and-hold S&P at default settings.
+- TSLA and NVDA carry the portfolio ($140K of $172K).
+- AAPL is barely break-even over 7 years (PF 1.01). Confirms 3y finding.
+- 3-2-2 pattern should be dropped (consistent loser across tickers).
+- Parameter tuning (timeframe, R:R, ATR filter, pattern selection) is the
+  next step to push the edge higher. See tuning plan below.
+
+---
+
 ## 2026-04-15 — Initial backtest battery
 
 ### Baseline: 12-month walk-forward (2025-04-15 to 2026-04-15)
