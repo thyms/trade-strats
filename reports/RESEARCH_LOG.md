@@ -8,6 +8,136 @@ in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
 ---
 
+## 2026-04-16 — Parameter tuning sweep (6 phases, 22 runs)
+
+Full tuning results over 7 years (2019-04-16 to 2026-04-16), 5 symbols,
+$50K per symbol. Each phase locks the winner and carries it forward.
+
+### Phase 1: Pattern selection (baseline: all 4 patterns)
+
+| Config | Trades | PnL | Winner? |
+|--------|-------:|----:|---------|
+| no-322 (drop 3-2-2) | 5,353 | $172,081 | Tied |
+| no-322-no-rev | 4,661 | $140,238 | |
+| 22-only | 3,968 | $94,066 | |
+| 22-312 | 4,661 | $140,238 | |
+
+**Winner: `no-322`** — dropping 3-2-2 costs nothing (was already suppressed
+by rev-strat overlap fix). Keeping rev-strat adds $32K over dropping it.
+
+### Phase 2: R:R ratio (locked: no-322 patterns)
+
+| min_rr | Trades | PnL | Winner? |
+|-------:|-------:|----:|---------|
+| 1.5 | 5,354 | $87,753 | |
+| 2.0 | 5,353 | $119,169 | |
+| 2.5 | 5,353 | $146,210 | |
+| 3.0 | 5,353 | $172,081 | |
+| **4.0** | **5,351** | **$196,035** | **Yes** |
+
+**Winner: R:R 4.0** — higher targets pay off despite lower fill rate.
+More R per trade compensates for fewer winners.
+
+### Phase 3: ATR filter (locked: no-322, R:R 4.0)
+
+| min_bar_atr_mult | Trades | PnL | Winner? |
+|-----------------:|-------:|----:|---------|
+| 0.0 | 5,756 | $227,933 | |
+| **0.25** | **5,748** | **$228,650** | **Yes** |
+| 0.5 | 5,351 | $196,035 | |
+| 0.75 | 4,113 | $121,085 | |
+| 1.0 | 2,789 | $65,380 | |
+
+**Winner: ATR 0.25** — light filter removes the worst setups without
+cutting too much volume. +$32K vs baseline ATR of 0.5.
+
+### Phase 4: Timeframe (locked: no-322, R:R 4.0, ATR 0.25)
+
+| Timeframe | Trades | PnL | Winner? |
+|-----------|-------:|----:|---------|
+| **5Min** | **14,863** | **$1,645,185** | **Yes** |
+| 10Min | 8,073 | $521,392 | |
+| 15Min | 5,748 | $228,650 | |
+| 20Min | 4,728 | $118,923 | |
+| 30Min | 3,317 | $74,579 | |
+
+**Winner: 5Min** — dramatically higher PnL due to 3x more trade opportunities.
+
+**CAUTION:** The 5Min result ($1.65M on $250K = 660%) is likely inflated by
+fill assumptions. At 5Min granularity, the 1-bar TIF and stop-before-target
+fill model is less realistic (bars are shorter, slippage matters more).
+**10Min ($521K, ~30% annualized)** is the more conservative pick.
+
+Per-symbol at 5Min:
+
+| Symbol | PnL | PF | Max DD% |
+|--------|----:|---:|--------:|
+| SPY | $829,088 | 1.24 | 20.4% |
+| QQQ | $161,494 | 1.11 | 17.1% |
+| AAPL | $4,044 | 1.00 | 59.8% |
+| NVDA | $122,914 | 1.11 | 29.0% |
+| TSLA | $527,646 | 1.19 | 24.5% |
+
+Per-symbol at 10Min (more realistic):
+
+| Symbol | PnL | PF | Max DD% |
+|--------|----:|---:|--------:|
+| SPY | $17,322 | 1.06 | 24.0% |
+| QQQ | $83,130 | 1.18 | 16.8% |
+| AAPL | $17,591 | 1.04 | 40.2% |
+| NVDA | $231,258 | **1.33** | 13.7% |
+| TSLA | $172,091 | **1.32** | 10.6% |
+
+### Phase 5: Side filter (locked: no-322, R:R 4.0, ATR 0.25, 5Min)
+
+| Sides | Trades | PnL | Winner? |
+|-------|-------:|----:|---------|
+| **both** | **14,863** | **$1,645,185** | **Yes** |
+| long-only | 7,973 | $458,908 | |
+| short-only | 7,000 | $374,139 | |
+
+**Winner: both sides.** Both long and short contribute positively.
+
+### Phase 6: Watchlist pruning (locked: all above, 5Min)
+
+| Watchlist | Trades | PnL | Winner? |
+|-----------|-------:|----:|---------|
+| **no-aapl (4 tickers)** | **11,978** | **$1,641,141** | **Yes** |
+| nvda-tsla (2 tickers) | 5,810 | $650,560 | |
+
+**Winner: drop AAPL** — removes 2,885 trades that contribute $4K while
+requiring $50K capital. AAPL's max DD of 59.8% confirms it's a liability.
+
+### Final best configuration
+
+```yaml
+strategy:
+  timeframe: 5Min    # (or 10Min for conservative)
+  patterns: [2-2, 3-1-2, rev-strat]  # drop 3-2-2
+  sides: [long, short]
+  min_rr: 4.0
+  min_bar_atr_mult: 0.25
+watchlist: [SPY, QQQ, NVDA, TSLA]   # drop AAPL
+```
+
+**5Min result:** $1.64M PnL on $200K capital (820%), ~38% annualized.
+**10Min result:** $521K PnL on $250K capital (209%), ~17% annualized.
+**Baseline (15Min):** $172K PnL on $250K capital (69%), ~7.7% annualized.
+
+### Open questions
+
+1. **5Min fill realism.** The 1-bar TIF fill model assumes entry at the
+   trigger price within one 5-min bar. In practice, slippage and partial
+   fills at this frequency need live validation. Paper trade before trusting.
+2. **10Min as pragmatic choice.** Still 3x the baseline return with more
+   realistic fill assumptions. NVDA and TSLA both PF > 1.30.
+3. **SPY dominance at 5Min** ($829K) is suspicious — SPY rarely moves
+   enough in 5 minutes for a 4R target. May be capturing noise.
+4. **Max drawdown** — 5Min SPY has 20.4% DD, TSLA 24.5%. Not catastrophic
+   but larger than 15Min. Position sizing may need adjustment.
+
+---
+
 ## 2026-04-16 — 7-year walk-forward baseline
 
 ### Full history: 7-year walk-forward (2019-04-16 to 2026-04-16)

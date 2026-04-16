@@ -91,26 +91,30 @@ def run_walk_forward(config_path: Path, label: str) -> str:
 
 def extract_summary(output: str, label: str) -> dict:
     """Parse the walk-forward summary from stdout."""
+    import re
+
     lines = output.strip().split("\n")
-    info = {"label": label, "total_trades": 0, "total_pnl": 0.0, "symbols": {}}
+    info: dict = {"label": label, "total_trades": 0, "total_pnl": 0.0, "symbols": {}}
+    # Pattern: SPY     trades=1092  win%= 36.9  PnL=$  9,708.56  PF=1.05
+    sym_re = re.compile(
+        r"^\s*([A-Z]+)\s+trades=(\d+)\s+win%=\s*([\d.]+)\s+PnL=\$\s*([\d,.-]+)\s+PF=([\d.]+|inf)"
+    )
     for line in lines:
-        line = line.strip()
-        if line.startswith("Total trades:"):
-            info["total_trades"] = int(line.split(":")[1].strip())
-        elif line.startswith("Total P&L:"):
-            info["total_pnl"] = float(line.split("$")[1].strip().replace(",", ""))
-        elif line and line[0].isupper() and "trades=" in line:
-            parts = line.split()
-            sym = parts[0]
-            trades = int(parts[1].split("=")[1])
-            win_pct = float(parts[2].split("=")[1])
-            pnl_str = parts[3].split("$")[1].replace(",", "")
-            pnl = float(pnl_str)
-            pf_str = parts[4].split("=")[1]
-            pf = float("inf") if pf_str == "inf" else float(pf_str)
-            info["symbols"][sym] = {
-                "trades": trades, "win_pct": win_pct, "pnl": pnl, "pf": pf,
-            }
+        stripped = line.strip()
+        if stripped.startswith("Total trades:"):
+            info["total_trades"] = int(stripped.split(":")[1].strip())
+        elif stripped.startswith("Total P&L:"):
+            info["total_pnl"] = float(stripped.split("$")[1].strip().replace(",", ""))
+        else:
+            m = sym_re.match(line)
+            if m:
+                sym, trades, wp, pnl_s, pf_s = m.groups()
+                info["symbols"][sym] = {
+                    "trades": int(trades),
+                    "win_pct": float(wp),
+                    "pnl": float(pnl_s.replace(",", "")),
+                    "pf": float("inf") if pf_s == "inf" else float(pf_s),
+                }
     return info
 
 
