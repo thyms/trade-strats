@@ -5,8 +5,9 @@ from pathlib import Path
 import typer
 from dotenv import load_dotenv
 
-from trade_strats.aggregation import TimedBar, aggregate, bucket_4h
 from trade_strats import bar_cache
+from trade_strats.aggregation import TimedBar, aggregate, bucket_4h
+from trade_strats.market_data import bucket_fn_for
 from trade_strats.backtest import (
     OpensProvider,
     build_opens_provider,
@@ -129,21 +130,40 @@ def _parse_date(value: str) -> datetime:
 DEFAULT_BAR_CACHE = Path("data/bars")
 
 
-async def _fetch_or_cache(
+async def _ensure_1m_cached(
     md: MarketData,
     cache_dir: Path,
     symbol: str,
-    timeframe: str,
     start: datetime,
     end: datetime,
 ) -> list[TimedBar]:
-    """Return bars from the local Parquet cache, falling back to Alpaca."""
-    cached = bar_cache.load(cache_dir, symbol, timeframe, start, end)
-    if cached is not None:
-        return cached
-    bars = await md.backfill(symbol, timeframe, start, end)
-    bar_cache.save(cache_dir, symbol, timeframe, start, end, bars)
-    return bars
+    """Return 1m bars for the date range, fetching uncached days from Alpaca.
+
+    Fetches the entire range on first miss; subsequent calls with overlapping
+    ranges only fetch the missing prefix/suffix.
+    """
+    start_date = start.astimezone(UTC).date()
+    end_date = end.astimezone(UTC).date()
+    already = bar_cache.cached_dates(cache_dir, symbol, start_date, end_date)
+
+    if not already:
+        fetched = await md.backfill(symbol, "1Min", start, end)
+        if fetched:
+            bar_cache.save_bars(cache_dir, symbol, fetched)
+    else:
+        earliest, latest = min(already), max(already)
+        if start_date < earliest:
+            before = start.replace(year=earliest.year, month=earliest.month, day=earliest.day)
+            fetched = await md.backfill(symbol, "1Min", start, before)
+            if fetched:
+                bar_cache.save_bars(cache_dir, symbol, fetched)
+        if end_date > latest:
+            after = end.replace(year=latest.year, month=latest.month, day=latest.day)
+            fetched = await md.backfill(symbol, "1Min", after, end)
+            if fetched:
+                bar_cache.save_bars(cache_dir, symbol, fetched)
+
+    return bar_cache.load_days(cache_dir, symbol, start_date, end_date)
 
 
 async def _fetch_for_backtest(
@@ -153,11 +173,17 @@ async def _fetch_for_backtest(
     end: datetime,
     cache_dir: Path = DEFAULT_BAR_CACHE,
 ) -> tuple[list[TimedBar], list[TimedBar], list[TimedBar], list[TimedBar]]:
-    """Fetch signal-TF + 1H + 1D from Alpaca (or local cache); locally aggregate 4H from 1H."""
+    """Cache 1m bars, then aggregate to signal-TF + 1H + 4H + 1D locally."""
     context_start = start - timedelta(days=30)
-    signal_bars = await _fetch_or_cache(md, cache_dir, symbol, md.strategy_tf, start, end)
-    daily = await _fetch_or_cache(md, cache_dir, symbol, "1D", context_start, end)
-    one_hour = await _fetch_or_cache(md, cache_dir, symbol, "1H", context_start, end)
+
+    # Cache 1m bars for the signal range and the context range (for FTFC opens).
+    one_min_signal = await _ensure_1m_cached(md, cache_dir, symbol, start, end)
+    one_min_context = await _ensure_1m_cached(md, cache_dir, symbol, context_start, end)
+
+    # Aggregate from 1m to every timeframe needed.
+    signal_bars = aggregate(one_min_signal, bucket_fn_for(md.strategy_tf))
+    daily = aggregate(one_min_context, bucket_fn_for("1D"))
+    one_hour = aggregate(one_min_context, bucket_fn_for("1H"))
     four_hour = aggregate(one_hour, bucket_4h)
     return signal_bars, daily, four_hour, one_hour
 

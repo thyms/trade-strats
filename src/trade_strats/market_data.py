@@ -17,7 +17,6 @@ from trade_strats.aggregation import (
     TimedBar,
     aggregate,
     bucket_1d,
-    bucket_1h,
     bucket_minutes,
     is_rth,
     parse_tf_minutes,
@@ -83,7 +82,7 @@ def _timeframe(tf: str) -> TimeFrame:
             raise ValueError(f"unsupported timeframe: {tf}")
 
 
-def _bucket_fn_for(tf: str) -> BucketFn:
+def bucket_fn_for(tf: str) -> BucketFn:
     """Return the appropriate bucket function for any timeframe string."""
     if tf == "1D":
         return bucket_1d
@@ -136,7 +135,7 @@ class MarketData:
                 agg_tfs.append(tf)
         self._aggregated_timeframes: tuple[str, ...] = tuple(agg_tfs)
         self._bucket_fns: dict[str, BucketFn] = {
-            tf: _bucket_fn_for(tf) for tf in self._aggregated_timeframes
+            tf: bucket_fn_for(tf) for tf in self._aggregated_timeframes
         }
 
     @property
@@ -226,7 +225,7 @@ class MarketData:
             return await self._fetch_bars(symbol, timeframe, start, end)
         # Non-native: fetch 1m and aggregate locally
         one_min = await self._fetch_bars(symbol, "1Min", start, end)
-        return aggregate(one_min, _bucket_fn_for(timeframe))
+        return aggregate(one_min, bucket_fn_for(timeframe))
 
     async def run(self, symbols: Sequence[str]) -> None:
         """Subscribe to 1m WS bars and stream forever. Cancel the task to stop."""
