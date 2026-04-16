@@ -124,17 +124,58 @@ watchlist: [SPY, QQQ, NVDA, TSLA]   # drop AAPL
 **10Min result:** $521K PnL on $250K capital (209%), ~17% annualized.
 **Baseline (15Min):** $172K PnL on $250K capital (69%), ~7.7% annualized.
 
-### Open questions
+### Validation (same session)
 
-1. **5Min fill realism.** The 1-bar TIF fill model assumes entry at the
-   trigger price within one 5-min bar. In practice, slippage and partial
-   fills at this frequency need live validation. Paper trade before trusting.
-2. **10Min as pragmatic choice.** Still 3x the baseline return with more
-   realistic fill assumptions. NVDA and TSLA both PF > 1.30.
-3. **SPY dominance at 5Min** ($829K) is suspicious — SPY rarely moves
-   enough in 5 minutes for a 4R target. May be capturing noise.
-4. **Max drawdown** — 5Min SPY has 20.4% DD, TSLA 24.5%. Not catastrophic
-   but larger than 15Min. Position sizing may need adjustment.
+Re-ran both configs and cross-checked from multiple angles:
+
+**Reproduction:** Both reproduce exactly (deterministic backtest).
+
+**Sub-period consistency (first half vs second half):**
+
+| Config | 2019-2022 PF | 2022-2026 PF | Verdict |
+|--------|-------------|-------------|---------|
+| 5Min | 1.20 | 1.10 | Both positive, slight fade |
+| 10Min | 1.27 | 1.15 | Both positive, slight fade |
+
+**Exit reason analysis — RED FLAG for 5Min:**
+
+| Metric | 5Min | 10Min | 15Min |
+|--------|------|-------|-------|
+| EOD exits | 16.6% → **$2.49M** | 32.1% → $1.33M | 39.0% → $474K |
+| Stop hits | 67.3% → -$9.6M | 57.9% → -$2.3M | 49.8% → -$903K |
+| Target hits | 16.1% → $8.8M | 10.0% → $1.5M | 11.2% → $601K |
+
+5Min's $1.65M PnL is almost entirely EOD drift — trades that enter, go
+the right way, never hit target, and close at EOD for a partial win.
+The 67% stop rate means the strategy is **wrong 2 out of 3 times**.
+The edge is real but thin ($111 mean PnL/trade) and vulnerable to slippage.
+
+**10Min year-by-year per symbol:**
+- NVDA: positive every year ($13K-$55K). Rock solid.
+- TSLA: positive every year ($3.7K-$45K). Also solid.
+- AAPL: degrades after 2022 — positive early, then 3 losing years.
+- SPY: mixed, 3 losing years. Weakest symbol.
+
+**Conclusion:** 10Min is the trustworthy finding. 5Min is likely inflated
+by EOD drift mechanics and thin per-trade edge. Recommend 10Min for live
+testing, with NVDA and TSLA as primary symbols.
+
+### Untried variations for next session
+
+1. **Risk per trade** — currently 0.5% ($250/trade on $50K). Try 0.25%
+   and 1.0% to see how sizing affects PnL and drawdown.
+2. **Max concurrent positions** — currently 3. Try 1 (focus), 5 (more
+   opportunities), and unlimited.
+3. **Max trades per day** — currently 5. Try 3 (selective) and 10.
+4. **Entry window narrowing** — currently 09:30-15:45. Try 10:00-15:00
+   (avoid open/close volatility) and 09:30-12:00 (morning only).
+5. **Per-symbol optimization** — run R:R and ATR sweeps per ticker
+   independently. NVDA may want different params than SPY.
+6. **Combination of 10Min + no-AAPL** — haven't run this specific combo.
+7. **R:R 5.0 and 6.0** — the sweep stopped at 4.0, which won. Higher
+   might be even better on volatile names like NVDA/TSLA.
+8. **FTFC timeframe variations** — currently uses 1D/4H/1H. Try dropping
+   4H, or using only 1D.
 
 ---
 
