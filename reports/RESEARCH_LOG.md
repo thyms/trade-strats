@@ -57,22 +57,46 @@ Recommended next step: paper-trade the 10Min config on NVDA + TSLA for
 1-2 months. Compare live fills vs backtest predictions. If live PF > 1.10
 after 50+ trades, then fund with $10K.
 
-### Untried variations for next session
+### Why R:R > 4.0 won't help (ruling it out)
 
-1. **Risk per trade** — currently 0.5% ($250/trade on $50K). Try 0.25%
-   and 1.0% to see how sizing affects PnL and drawdown.
-2. **Max concurrent positions** — currently 3. Try 1 (focus), 5 (more
-   opportunities), and unlimited.
-3. **Max trades per day** — currently 5. Try 3 (selective) and 10.
-4. **Entry window narrowing** — currently 09:30-15:45. Try 10:00-15:00
+The PnL increase from R:R 1.5→4.0 came from filtering out low-quality
+setups (min_rr rejects trades where the target can't fit), not from the
+target itself being better. At R:R 4.0, only 10% of 10Min trades hit the
+target — 32% exit at EOD, 58% hit the stop.
+
+Pushing to R:R 5.0 or 6.0 would:
+- **EOD exits: same PnL** — they close at the same price regardless
+  of where the target sits.
+- **Target hits: fewer, paying slightly more each** — but very few
+  trades that reach 4R would have continued to 5R or 6R.
+- **Stops: identical** — stop price doesn't depend on R:R.
+
+Net effect: flat or slightly worse. Not worth testing.
+
+### Untried variations for next session (prioritized)
+
+**High-impact, change trade selection/execution:**
+1. **Slippage model** — add fixed $0.10/share penalty to the backtest.
+   The 10Min edge is $65 mean PnL/trade — need to know if it survives.
+2. **Entry window narrowing** — currently 09:30-15:45. Try 10:00-15:00
    (avoid open/close volatility) and 09:30-12:00 (morning only).
-5. **Per-symbol optimization** — run R:R and ATR sweeps per ticker
+3. **Combination of 10Min + no-AAPL** — hasn't been run yet. Expected
+   best realistic config.
+4. **Risk per trade** — currently 0.5% ($250/trade on $50K). Try 0.25%
+   and 1.0% to see how sizing affects PnL and drawdown.
+
+**Medium-impact, structural:**
+5. **Max concurrent positions** — currently 3. Try 1 (focus), 5 (more
+   opportunities), and unlimited.
+6. **Max trades per day** — currently 5. Try 3 (selective) and 10.
+7. **Per-symbol optimization** — run R:R and ATR sweeps per ticker
    independently. NVDA may want different params than SPY.
-6. **Combination of 10Min + no-AAPL** — hasn't been run yet.
-7. **R:R 5.0 and 6.0** — the sweep stopped at 4.0, which won. Higher
-   might be even better on volatile names like NVDA/TSLA.
 8. **FTFC timeframe variations** — currently uses 1D/4H/1H. Try dropping
    4H, or using only 1D.
+
+**Live validation (after above):**
+9. **Paper-trade** 10Min config on NVDA + TSLA for 1-2 months.
+10. **Fill comparison tool** — log live fills vs backtest predictions.
 
 ---
 
