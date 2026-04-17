@@ -94,9 +94,33 @@ Net effect: flat or slightly worse. Not worth testing.
 8. **FTFC timeframe variations** — currently uses 1D/4H/1H. Try dropping
    4H, or using only 1D.
 
-**Live validation (after above):**
-9. **Paper-trade** 10Min config on NVDA + TSLA for 1-2 months.
-10. **Fill comparison tool** — log live fills vs backtest predictions.
+**Engineering (backtest realism):**
+9. **Slippage model in backtest** — add configurable fixed per-share
+   penalty (e.g. $0.10/share) to entry and exit fills. The 10Min edge
+   is only $65 mean/trade — need to know if it survives realistic
+   execution costs. Simple to implement: adjust fill prices in
+   `_check_entry_fill` and `_check_exit`.
+10. **Commission model** — add per-trade fee ($0.50-$1.00 round trip).
+    At ~5 trades/day, this is ~$1K-$4K/year drag.
+
+**Live validation pipeline:**
+11. **Paper-trade** 10Min config on NVDA + TSLA via Alpaca paper account
+    for 1-2 months. The `run` command already connects to Alpaca WS —
+    just needs the 10Min config pointed at it.
+12. **Fill comparison tool** — log each live fill alongside what the
+    backtest would have predicted for the same bar. Measures the gap
+    between sim and reality. Key metric: live PF vs backtest PF.
+13. **Go/no-go gate** — if paper PF > 1.10 after 50+ trades, fund
+    with $10K real money on NVDA + TSLA only.
+
+**Strategic (ticker expansion):**
+14. **Per-symbol parameter optimization** — run independent R:R and ATR
+    sweeps per ticker. NVDA and TSLA may want very different settings
+    than SPY. Could unlock edge on symbols that are currently marginal.
+15. **Scan for new tickers** — look for other high-volatility, liquid
+    names with similar characteristics to NVDA/TSLA (high ATR, trending
+    behavior). Candidates: AMD, AMZN, META, GOOG, COIN, MSTR.
+    Run the 10Min config on each and check if PF > 1.10.
 
 ---
 
