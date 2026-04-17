@@ -23,6 +23,7 @@ class StrategyConfig(BaseModel):
     min_rr: float = Field(ge=1)
     min_bar_atr_mult: float = Field(ge=0)
     ftfc_timeframes: list[str]
+    slippage_per_share: float = Field(default=0.0, ge=0)
 
     @field_validator("sides")
     @classmethod

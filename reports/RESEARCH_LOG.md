@@ -8,6 +8,174 @@ in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
 ---
 
+## 2026-04-17 — Architecture assessment: multi-strategy support
+
+Assessed whether the codebase can support strategies beyond TheStrat,
+specifically the $25K Options Challenge (mean-reversion with Bollinger
+Bands, Keltner Channels, ADX, RSI, vertical debit spreads).
+
+### What's reusable as-is
+
+| Layer | Files | Reusable? | Notes |
+|-------|-------|-----------|-------|
+| **Bar cache** | `bar_cache.py` | Yes | Strategy-agnostic. Any strategy needs OHLCV data. |
+| **Market data** | `market_data.py` | Yes | Alpaca WS + historical. Aggregation is generic. |
+| **Aggregation** | `aggregation.py` | Yes | `aggregate_df` works for any timeframe. |
+| **Journal** | `journal.py` | Mostly | Trade logging is generic. Schema may need new fields. |
+| **Execution** | `execution.py` | Partially | Bracket orders are equity-specific. Options need a different order builder. |
+| **CLI + reports** | `cli.py`, `reports.py` | Yes | Walk-forward harness is strategy-agnostic. |
+| **TUI** | `tui.py` | Yes | Status display is generic. |
+
+### What's TheStrat-specific (needs abstraction)
+
+| Component | Current | Needed for $25K Challenge |
+|-----------|---------|--------------------------|
+| **Signal detection** | `strategy/patterns.py` — bar scenario classification (1/2/3), detect 2-2, 3-2-2, etc. | Bollinger Band pierce + Keltner squeeze + ADX < 40 + RSI reversal |
+| **Directional filter** | `strategy/ftfc.py` — FTFC alignment across TFs | Not needed (mean-reversion is contrarian, not trend-following) |
+| **Trade structure** | Stop-limit entry, bracket with stop + target | Vertical debit spread (buy ITM, sell OTM, 30-60 DTE) |
+| **Risk sizing** | `risk.py` — fixed % of equity per trade | Fixed dollar risk per spread ($250), 30% capital allocation |
+| **Exit logic** | 1-bar TIF entry, stop/target/EOD | GTC at 90-100% max profit, 50% loss manual close, 5-day-to-expiry exit |
+| **Backtest engine** | `backtest.py` — equity fills, intraday bar replay | Options pricing (need Greeks, IV), spread P&L curves, time decay |
+| **Data requirements** | OHLCV bars only | OHLCV + options chains + IV + earnings calendar |
+
+### Architecture recommendation
+
+The codebase is ~3,700 lines. About **60% is reusable** (data, caching,
+journal, CLI, reports). The strategy-specific 40% would need a **Strategy
+interface** that the backtest and orchestrator call:
+
+```python
+class Strategy(Protocol):
+    def detect_signals(self, bars: Sequence[TimedBar]) -> list[Signal]: ...
+    def filter_signal(self, signal: Signal, context: MarketContext) -> bool: ...
+    def build_order(self, signal: Signal, account: AccountSnapshot) -> Order | None: ...
+    def check_exit(self, position: Position, bar: TimedBar) -> ExitSignal | None: ...
+```
+
+TheStrat becomes one implementation; the $25K Challenge becomes another.
+
+### Feasibility verdict
+
+| Dimension | Effort | Notes |
+|-----------|--------|-------|
+| Extract Strategy interface | Medium | ~2 days. Clean separation of detect/filter/order/exit. |
+| Implement $25K Challenge signals | Medium | Bollinger/Keltner/ADX/RSI are standard TA-Lib indicators. |
+| Options execution | **Hard** | Alpaca options API is different from equities. Need options chain data, Greeks, spread order types. |
+| Options backtesting | **Hard** | Need historical options pricing data (not available from Alpaca free tier). Would need to use theoretical pricing (Black-Scholes) or a paid data source. |
+| Earnings calendar | Easy | Free APIs available (Alpha Vantage, SEC EDGAR). |
+
+**Bottom line:** The signal detection and filtering are straightforward
+to implement. The hard part is **options execution and backtesting** —
+the current backtest engine assumes equity fills with simple stop/target
+mechanics. Options have time decay, IV changes, and complex P&L curves
+that require fundamentally different simulation logic.
+
+**Recommended approach:** Implement the $25K Challenge signals using
+the existing equity backtest first (use shares instead of spreads to
+validate the signal quality), then add options-specific execution later
+if the signals prove profitable on equities.
+
+---
+
+## 2026-04-17 — Phase 3: slippage, entry window, FTFC, per-symbol R:R
+
+Added slippage model, entry window filter, and configurable FTFC to the
+backtest engine. Ran 34 experiments.
+
+### A. Slippage model — THE CRITICAL FINDING
+
+| Slippage/share | Trades | PnL | AvgPF | MaxDD |
+|---------------:|-------:|----:|------:|------:|
+| $0.00 | 8,073 | $521,392 | 1.19 | 40.2% |
+| $0.05 | 8,071 | $78,981 | **0.98** | 82.4% |
+| $0.10 | 8,049 | **-$94,612** | 0.83 | 96.8% |
+| $0.20 | 7,845 | -$205,886 | 0.62 | 99.8% |
+| $0.50 | 5,440 | -$247,853 | 0.36 | 99.9% |
+
+**The 10Min edge does not survive even $0.05/share slippage.**
+
+At $0.05 slippage the strategy is break-even (PF 0.98). At $0.10 it's
+a net loser. This confirms the concern: mean PnL/trade of $65 is too
+thin. Real-world execution on 10Min bars with stop-limit entries on
+NVDA/TSLA would likely see $0.05-$0.20 slippage.
+
+**This changes the entire assessment.** The strategy has signal but
+the execution model is too optimistic. To go live profitably, we need
+either: (a) much lower slippage (direct market access, co-location),
+or (b) a wider edge per trade (fewer but higher-conviction setups).
+
+### B. Entry window
+
+| Window (ET) | Trades | PnL | AvgPF | MaxDD |
+|-------------|-------:|----:|------:|------:|
+| 09:30-15:45 (full) | 8,073 | $521,392 | 1.19 | 40.2% |
+| 10:00-15:45 (skip open) | 6,959 | $450,370 | 1.19 | 30.9% |
+| 10:00-15:00 (core) | 6,124 | $388,339 | **1.20** | **23.6%** |
+| 09:30-12:00 (morning) | 3,836 | $183,671 | **1.22** | **22.3%** |
+| 09:30-11:00 (early) | 2,597 | $102,951 | 1.21 | 20.6% |
+
+**Morning-only (09:30-12:00) has the best PF (1.22) and lowest DD (22.3%).**
+Fewer trades but higher quality. The afternoon session adds volume but
+dilutes the edge. This is consistent with TheStrat's emphasis on the
+opening range.
+
+### C. FTFC timeframe variations
+
+| FTFC mode | Trades | PnL | AvgPF | MaxDD |
+|-----------|-------:|----:|------:|------:|
+| 1H only | 13,639 | $712,024 | 1.13 | 31.1% |
+| 1D only | 10,634 | $607,676 | 1.14 | 55.3% |
+| 1D + 1H (no 4H) | 8,515 | $555,651 | 1.19 | 43.3% |
+| Full (1D+4H+1H) | 8,073 | $521,392 | 1.19 | 40.2% |
+| None | 0 | $0 | — | — |
+
+**Dropping 4H adds $34K PnL with same PF (1.19).** The 4H timeframe
+is slightly restrictive without adding signal quality. However, the
+improvement is modest — confirms 4H is low-impact, not harmful.
+
+Note: `ftfc-none` produced 0 trades — the `ftfc_state` function returns
+MIXED when no timeframes are checked, which blocks all trades. This is
+a bug (should bypass FTFC entirely), but not relevant to real configs.
+
+### D. Per-symbol R:R optimization
+
+**R:R keeps improving up to 6.0 for all four top tickers!**
+
+| Ticker | Best R:R | PnL at RR=6 | PF at RR=6 | PnL at RR=4 | PF at RR=4 |
+|--------|---------|------------:|----------:|-----------:|----------:|
+| NVDA | 6.0 | $280,867 | 1.37 | $231,258 | 1.33 |
+| TSLA | 6.0 | $226,735 | 1.37 | $172,091 | 1.32 |
+| COIN | 6.0 | $180,127 | 1.34 | $111,722 | 1.26 |
+| MSTR | 6.0 | $109,819 | 1.35 | $48,820 | 1.23 |
+
+This contradicts the earlier R:R analysis (which found 4.0 optimal on the
+original 5 tickers at 15Min). The difference: these are high-volatility
+names that can sustain larger intraday moves. At R:R 6.0, total across
+4 tickers would be $797K vs $564K at R:R 4.0 (+41%).
+
+**However, combine this with slippage and R:R 6.0 won't help either** —
+the per-trade edge is still too thin for real execution costs.
+
+### Updated assessment
+
+The strategy has **genuine signal** (pattern detection + FTFC alignment
+produces positive expected value in a frictionless sim). But the edge is
+**too thin to survive execution costs**. At $0.05/share slippage the
+entire 7-year profit evaporates.
+
+**Path forward options:**
+1. **Longer timeframes** — 30Min or 1H bars have larger price moves per
+   trade, which may absorb slippage better. The baseline 30Min run had
+   PF 1.17 with 3,317 trades — needs slippage testing.
+2. **Fewer, higher-conviction setups** — morning-only window + stricter
+   ATR filter could concentrate on trades with larger moves.
+3. **Different entry mechanics** — limit orders instead of stop-limits
+   could reduce slippage to near-zero, but change the strategy logic.
+4. **Options instead of shares** — wider spreads but percentage moves
+   amplify the edge (relates to the $25K Challenge approach).
+
+---
+
 ## 2026-04-17 — Phase 2 tuning: risk, concurrency, new tickers
 
 Added 6 new tickers (AMD, AMZN, META, GOOG, COIN, MSTR) with 7 years

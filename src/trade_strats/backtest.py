@@ -2,9 +2,9 @@ import bisect
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time
 
-from trade_strats.aggregation import TimedBar
+from trade_strats.aggregation import ET, TimedBar
 from trade_strats.config import Config
 from trade_strats.orchestrator import compute_atr14, pick_best_setup
 from trade_strats.risk import AccountSnapshot, Rejection
@@ -100,30 +100,39 @@ def _pnl(pos: _OpenPosition, exit_price: float) -> float:
     return (pos.entry_price - exit_price) * pos.qty
 
 
-def _check_exit(pos: _OpenPosition, bar: TimedBar) -> tuple[float, str] | None:
-    """Detect exit fill on a bar. If both stop and target hit, assume stop fires first."""
+def _check_exit(
+    pos: _OpenPosition, bar: TimedBar, slippage: float = 0.0
+) -> tuple[float, str] | None:
+    """Detect exit fill on a bar. If both stop and target hit, assume stop fires first.
+
+    Slippage penalises the fill: stops fill worse (further from entry),
+    targets fill worse (closer to entry).
+    """
     if pos.side is Side.LONG:
         if bar.low <= pos.stop_price:
-            return pos.stop_price, "stop"
+            return pos.stop_price - slippage, "stop"
         if bar.high >= pos.target_price:
-            return pos.target_price, "target"
+            return pos.target_price - slippage, "target"
     else:
         if bar.high >= pos.stop_price:
-            return pos.stop_price, "stop"
+            return pos.stop_price + slippage, "stop"
         if bar.low <= pos.target_price:
-            return pos.target_price, "target"
+            return pos.target_price + slippage, "target"
     return None
 
 
-def _check_entry_fill(pb: _PendingBracket, bar: TimedBar) -> tuple[bool, float]:
-    """Return (filled, fill_price) for the parent stop-limit against one bar."""
+def _check_entry_fill(
+    pb: _PendingBracket, bar: TimedBar, slippage: float = 0.0
+) -> tuple[bool, float]:
+    """Return (filled, fill_price) for the parent stop-limit against one bar.
+
+    Slippage penalises the fill price against the trader.
+    """
     if pb.side is Side.LONG:
         if bar.high >= pb.entry_price:
-            # Gap-up: fill at open; otherwise at trigger
-            return True, max(bar.open, pb.entry_price)
+            return True, max(bar.open, pb.entry_price) + slippage
     elif bar.low <= pb.entry_price:
-        # Gap-down short: fill at open; otherwise at trigger
-        return True, min(bar.open, pb.entry_price)
+        return True, min(bar.open, pb.entry_price) - slippage
     return False, 0.0
 
 
@@ -175,6 +184,13 @@ def run_backtest(
     risk_cfg = config.risk_config()
     allowed_patterns = set(config.strategy.patterns)
     allowed_sides = set(config.strategy.sides)
+    slippage = config.strategy.slippage_per_share
+    ftfc_tfs = tuple(config.strategy.ftfc_timeframes)
+
+    # Parse entry window (ET)
+    win_open_str, win_close_str = config.session.entry_window_et
+    win_open = time(*[int(x) for x in win_open_str.split(":")])
+    win_close = time(*[int(x) for x in win_close_str.split(":")])
 
     for i, bar in enumerate(signal_bars):
         bar_date = bar.ts.date().isoformat()
@@ -184,7 +200,8 @@ def run_backtest(
                 prev_close = signal_bars[i - 1].close
                 prev_ts = signal_bars[i - 1].ts
                 for pos in open_positions:
-                    trade = _close_position_at(pos, prev_ts, prev_close, "eod")
+                    eod_price = (prev_close - slippage) if pos.side is Side.LONG else (prev_close + slippage)
+                    trade = _close_position_at(pos, prev_ts, eod_price, "eod")
                     completed.append(trade)
                     equity += trade.realized_pnl
                 open_positions = []
@@ -195,7 +212,7 @@ def run_backtest(
 
         still_open: list[_OpenPosition] = []
         for pos in open_positions:
-            exit_info = _check_exit(pos, bar)
+            exit_info = _check_exit(pos, bar, slippage)
             if exit_info is None:
                 still_open.append(pos)
                 continue
@@ -211,7 +228,7 @@ def run_backtest(
             if bar.ts <= pb.submitted_bar_ts:
                 expired.append(pb)
                 continue
-            filled, fill_price = _check_entry_fill(pb, bar)
+            filled, fill_price = _check_entry_fill(pb, bar, slippage)
             if not filled:
                 continue
             position = _OpenPosition(
@@ -228,7 +245,7 @@ def run_backtest(
             trades_today += 1
             # Intra-bar: price continued through the bar's range after fill;
             # check if stop or target would have been hit in the same bar.
-            same_bar_exit = _check_exit(position, bar)
+            same_bar_exit = _check_exit(position, bar, slippage)
             if same_bar_exit is not None:
                 exit_price, exit_reason = same_bar_exit
                 trade = _close_position_at(position, bar.ts, exit_price, exit_reason)
@@ -266,10 +283,15 @@ def run_backtest(
         if setup is None:
             continue
 
+        # Entry window filter (ET)
+        bar_et = bar.ts.astimezone(ET).time()
+        if not (win_open <= bar_et < win_close):
+            continue
+
         opens = opens_provider(bar.ts)
         if opens is None:
             continue
-        state = ftfc_state(bar.close, opens)
+        state = ftfc_state(bar.close, opens, ftfc_tfs)
         if not allows(setup.side, state):
             continue
 
@@ -300,7 +322,8 @@ def run_backtest(
     if open_positions and signal_bars:
         last = signal_bars[-1]
         for pos in open_positions:
-            trade = _close_position_at(pos, last.ts, last.close, "eod")
+            eod_price = (last.close - slippage) if pos.side is Side.LONG else (last.close + slippage)
+            trade = _close_position_at(pos, last.ts, eod_price, "eod")
             completed.append(trade)
             equity += trade.realized_pnl
 
