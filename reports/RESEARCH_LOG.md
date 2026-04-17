@@ -8,6 +8,74 @@ in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
 ---
 
+## 2026-04-17 — Complete experiment matrix & live-readiness assessment
+
+### Full experiment matrix (21 runs, sorted by PnL, 7y, $50K/symbol)
+
+| #  | Label           | TF    | Patterns    | RR  | ATR  | Side | Sym | Trades |          PnL | Win%  | AvgPF | MaxDD |
+|----|-----------------|-------|-------------|-----|------|------|-----|--------|--------------|-------|-------|-------|
+| 1  | tf-5m           | 5Min  | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 5   |  14863 |  $1,645,185  | 29.8% |  1.13 | 59.8% |
+| 2  | no-aapl         | 5Min  | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 4   |  11978 |  $1,641,141  | 30.3% |  1.16 | 29.0% |
+| 3  | nvda-tsla       | 5Min  | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 2   |   5810 |    $650,560  | 30.9% |  1.15 | 29.0% |
+| 4  | **tf-10m**      | 10Min | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 5   |   8073 |    $521,392  | 35.7% |  1.19 | 40.2% |
+| 5  | long-only       | 5Min  | 2-2,3-1,rev | 4.0 | 0.25 | L    | 5   |   7973 |    $458,908  | 30.2% |  1.14 | 50.4% |
+| 6  | short-only      | 5Min  | 2-2,3-1,rev | 4.0 | 0.25 | S    | 5   |   7000 |    $374,139  | 29.5% |  1.13 | 40.5% |
+| 7  | atr-0.25        | 15Min | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 5   |   5748 |    $228,650  | 39.2% |  1.16 | 34.9% |
+| 8  | rr-4.0          | 15Min | 2-2,3-1,rev | 4.0 | 0.50 | L+S  | 5   |   5351 |    $196,035  | 40.2% |  1.18 | 28.7% |
+| 9  | baseline        | 15Min | all 4        | 3.0 | 0.50 | L+S  | 5   |   5353 |    $172,081  | 40.7% |  1.17 | 27.8% |
+| 10 | rr-2.5          | 15Min | 2-2,3-1,rev | 2.5 | 0.50 | L+S  | 5   |   5353 |    $146,210  | 41.4% |  1.15 | 25.5% |
+| 11 | no-322-no-rev   | 15Min | 2-2,3-1     | 3.0 | 0.50 | L+S  | 5   |   4661 |    $140,238  | 40.7% |  1.17 | 25.5% |
+| 12 | atr-0.75        | 15Min | 2-2,3-1,rev | 4.0 | 0.75 | L+S  | 5   |   4113 |    $121,085  | 41.7% |  1.18 | 27.5% |
+| 13 | tf-20m          | 20Min | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 5   |   4728 |    $118,923  | 41.9% |  1.14 | 33.5% |
+| 14 | 22-only         | 15Min | 2-2          | 3.0 | 0.50 | L+S  | 5   |   3968 |     $94,066  | 40.4% |  1.15 | 18.7% |
+| 15 | rr-1.5          | 15Min | 2-2,3-1,rev | 1.5 | 0.50 | L+S  | 5   |   5354 |     $87,753  | 45.9% |  1.11 | 14.7% |
+| 16 | tf-30m          | 30Min | 2-2,3-1,rev | 4.0 | 0.25 | L+S  | 5   |   3317 |     $74,579  | 46.5% |  1.17 | 19.8% |
+| 17 | atr-1.0         | 15Min | 2-2,3-1,rev | 4.0 | 1.00 | L+S  | 5   |   2789 |     $65,380  | 44.0% |  1.19 | 15.9% |
+
+### Live-readiness assessment
+
+**What the backtest proves:**
+- Real, positive edge on NVDA and TSLA across all timeframes, all years,
+  both halves of the 7-year dataset.
+- 10Min with R:R 4.0, ATR 0.25 is the most consistent config (PF 1.19,
+  NVDA every year positive, TSLA every year positive).
+- Pattern detection works — 2-2 and 3-1-2 are genuine signals.
+
+**What the backtest does NOT prove:**
+1. **Fill quality** — sim assumes entry at trigger price within one bar.
+   Live slippage on NVDA/TSLA could be $0.10-$0.50/share. Mean PnL/trade
+   is only $65 at 10Min — slippage could eat a large share.
+2. **EOD exit** — 32% of 10Min trades exit at EOD at "last bar close."
+   Live force-flat at 15:55 gets market fills, not limit fills.
+3. **No commissions** — ~5 trades/day × $0.50 RT = ~$4K/year drag.
+4. **Max drawdown** — 40% (AAPL at 10Min). On $10K → $4K underwater.
+5. **No out-of-sample test** — params were tuned ON the full dataset.
+
+**Verdict: NOT ready for live money yet.**
+
+Recommended next step: paper-trade the 10Min config on NVDA + TSLA for
+1-2 months. Compare live fills vs backtest predictions. If live PF > 1.10
+after 50+ trades, then fund with $10K.
+
+### Untried variations for next session
+
+1. **Risk per trade** — currently 0.5% ($250/trade on $50K). Try 0.25%
+   and 1.0% to see how sizing affects PnL and drawdown.
+2. **Max concurrent positions** — currently 3. Try 1 (focus), 5 (more
+   opportunities), and unlimited.
+3. **Max trades per day** — currently 5. Try 3 (selective) and 10.
+4. **Entry window narrowing** — currently 09:30-15:45. Try 10:00-15:00
+   (avoid open/close volatility) and 09:30-12:00 (morning only).
+5. **Per-symbol optimization** — run R:R and ATR sweeps per ticker
+   independently. NVDA may want different params than SPY.
+6. **Combination of 10Min + no-AAPL** — hasn't been run yet.
+7. **R:R 5.0 and 6.0** — the sweep stopped at 4.0, which won. Higher
+   might be even better on volatile names like NVDA/TSLA.
+8. **FTFC timeframe variations** — currently uses 1D/4H/1H. Try dropping
+   4H, or using only 1D.
+
+---
+
 ## 2026-04-16 — Parameter tuning sweep (6 phases, 22 runs)
 
 Full tuning results over 7 years (2019-04-16 to 2026-04-16), 5 symbols,
