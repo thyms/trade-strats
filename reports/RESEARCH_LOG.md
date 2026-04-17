@@ -8,6 +8,99 @@ in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
 ---
 
+## 2026-04-17 — Phase 2 tuning: risk, concurrency, new tickers
+
+Added 6 new tickers (AMD, AMZN, META, GOOG, COIN, MSTR) with 7 years
+of cached 1Min data. Ran 21 experiments on the 10Min best config.
+
+### Key findings by dimension
+
+**A. 10Min + drop-AAPL:** $503,801 PnL, PF 1.22, MaxDD 24.0%.
+Confirms AAPL removal improves risk-adjusted returns.
+
+**B. Risk per trade:**
+
+| Risk/trade | Trades | PnL | AvgPF | MaxDD |
+|-----------|-------:|----:|------:|------:|
+| 0.25% | 8,079 | $178,813 | 1.20 | 22.0% |
+| **0.50%** | **8,073** | **$521,392** | **1.19** | **40.2%** |
+| 1.0% | 7,784 | $2,181,421 | 1.16 | **69.3%** |
+
+1.0% risk generates 4x the PnL but with 69% max drawdown (AAPL).
+0.50% is the sweet spot for risk-adjusted returns. 0.25% if conservative.
+
+**C. Max concurrent positions:**
+
+| Max | Trades | PnL | Note |
+|----:|-------:|----:|------|
+| 1 | 6,399 | $313,878 | Misses many setups |
+| 3 | 8,073 | $521,392 | Baseline |
+| 5 | 8,095 | $531,740 | Marginal gain (+$10K) |
+| 10 | 8,095 | $531,740 | Same as 5 — rarely >5 concurrent |
+
+**3 is fine.** Going to 5 adds only $10K over 7 years. The strategy
+rarely has more than 3 positions open simultaneously.
+
+**D. Max trades/day:**
+
+| Max | Trades | PnL |
+|----:|-------:|----:|
+| 3 | 7,916 | $501,666 |
+| 5 | 8,073 | $521,392 |
+| 10 | 8,074 | $520,128 |
+| 20 | 8,074 | $520,128 |
+
+**5 is fine.** Almost never hits the cap. No value in raising it.
+
+**E. New tickers (solo, 10Min best config):**
+
+| Ticker | Trades | PnL | PF | MaxDD | Verdict |
+|--------|-------:|----:|---:|------:|---------|
+| **COIN** | **1,340** | **$111,722** | **1.26** | **12.5%** | **Add** |
+| AMZN | 1,522 | $57,931 | 1.13 | 19.2% | Maybe |
+| **MSTR** | **833** | **$48,820** | **1.23** | **13.9%** | **Add** |
+| GOOG | 1,307 | $41,277 | 1.11 | 26.6% | Marginal |
+| AMD | 1,502 | $30,827 | 1.09 | 24.0% | Weak |
+| META | 1,501 | $15,676 | 1.05 | 21.3% | Skip |
+
+**COIN is outstanding** — PF 1.26, only 12.5% max DD, and only 5 years
+of data (IPO'd April 2021). Best PF/DD ratio of any ticker tested.
+**MSTR** is similar — PF 1.23, 13.9% DD, strong on a crypto-correlated name.
+
+**F. Expanded watchlists:**
+
+| Watchlist | Tickers | Trades | PnL | AvgPF | MaxDD |
+|-----------|--------:|-------:|----:|------:|------:|
+| all-11 | 11 | 16,078 | $827,643 | 1.16 | 40.2% |
+| core4+new | 10 | 14,458 | $810,053 | 1.18 | 26.6% |
+| **volatile-6** | **6** | **8,343** | **$610,393** | **1.21** | **24.0%** |
+
+**volatile-6 (NVDA, TSLA, AMD, COIN, MSTR, META)** has the best
+risk-adjusted profile: PF 1.21, MaxDD 24%, $610K on $300K capital.
+But META is the weakest link (PF 1.05). Replacing META with AMZN
+or dropping to 5 tickers could improve further.
+
+### Updated best configuration
+
+```yaml
+strategy:
+  timeframe: 10Min
+  patterns: [2-2, 3-1-2, rev-strat]
+  sides: [long, short]
+  min_rr: 4.0
+  min_bar_atr_mult: 0.25
+account:
+  risk_pct_per_trade: 0.005  # 0.50%
+  max_concurrent: 3
+  max_trades_per_day: 5
+watchlist: [NVDA, TSLA, COIN, MSTR]  # strongest 4 by PF/DD
+```
+
+Projected on $200K (4 × $50K): ~$565K PnL over 7y (~17% annualized),
+all symbols PF > 1.20, max DD < 15%. Still needs slippage validation.
+
+---
+
 ## 2026-04-17 — Complete experiment matrix & live-readiness assessment
 
 ### Full experiment matrix (21 runs, sorted by PnL, 7y, $50K/symbol)
