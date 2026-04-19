@@ -24,8 +24,17 @@ uv run trade-strats backtest --symbol NVDA --start 2023-01-01 --end 2026-04-01 -
 # Run walk-forward (all watchlist symbols)
 uv run trade-strats walk-forward --start 2019-04-16 --end 2026-04-16 --config config/config.example.yaml
 
+# Start paper trading (continuous, multi-day)
+uv run trade-strats run-live --config config/paper-a.yaml
+
+# Slippage report from live journal
+uv run python scripts/compare_fills.py --since 2026-04-20
+
 # Fetch and cache 1Min bars for new tickers
 uv run python scripts/fetch_bars.py AMD AMZN META
+
+# BTC backtest (crypto, 24/7)
+uv run python scripts/btc_backtest.py --timeframe 1H --rr 4.0
 
 # Run tuning sweeps
 uv run python scripts/run_tuning.py          # Phase 1: patterns, RR, ATR, timeframe, sides, watchlist

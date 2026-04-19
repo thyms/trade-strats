@@ -1,0 +1,44 @@
+# Paper Trading Config A: NVDA / COIN / MSTR on 10Min bars.
+#
+# Rationale (from reports/PAPER_TRADING_PLAN.md):
+#   - NVDA: PF 1.33 at 10Min baseline, best with rev-strat kept in.
+#   - COIN: PF 1.26, 12.5% max DD. Best new ticker from Phase 2 sweep.
+#   - MSTR: PF 1.23, 13.9% max DD. Similar crypto-correlated profile.
+# Entry window narrowed to 10:00-15:00 to skip open/close volatility
+# (gained PF 1.33 vs 1.19 in backtest).
+
+mode: paper
+
+account:
+  sim_equity_usd: 50000         # Alpaca paper seeds at $100K; sizing uses $50K per symbol
+  risk_pct_per_trade: 0.005     # $250/trade
+  daily_loss_cap_pct: 0.02      # $1,000/day before halt
+  max_concurrent: 3
+  max_trades_per_day: 5
+
+strategy:
+  timeframe: 10Min
+  patterns: [2-2, 3-1-2, rev-strat]
+  sides: [long, short]
+  min_rr: 4.0
+  min_bar_atr_mult: 0.25
+  ftfc_timeframes: [1D, 4H, 1H]
+  slippage_per_share: 0.0       # live fills will report actual slippage
+
+watchlist:
+  - NVDA
+  - COIN
+  - MSTR
+
+session:
+  entry_window_et: ["10:00", "15:00"]
+  force_flat_et: "15:55"
+
+blackouts: []
+# Add FOMC / earnings dates manually before each event.
+# Example: - 2026-05-07T14:00:00-04:00
+
+paths:
+  db: data/trades.db
+  events_log: data/events.jsonl
+  reports_dir: reports

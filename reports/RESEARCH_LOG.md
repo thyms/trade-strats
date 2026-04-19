@@ -8,6 +8,124 @@ in `walk-forward/` and `backtest/` subdirectories (JSON + Markdown).
 
 ---
 
+## 2026-04-19 — BTC backtest (Track B)
+
+Added crypto support to the backtest path — 24/7 aggregation (UTC-midnight
+anchor, no RTH filter, no force-flat). Fetched BTC/USD 1Min bars from
+Alpaca's crypto endpoint (no auth required) and ran TheStrat patterns.
+
+### Full period results (2022-01-01 to 2026-04-18, $50K equity)
+
+| TF  | Trades | Win% | PF | PnL | DD | Verdict |
+|-----|-------:|-----:|---:|----:|---:|---------|
+| 10Min | 2,986 | 22.1% | **0.94** | -$24,513 | **53.8%** | Net loser. |
+| 15Min | 1,991 | 22.3% | 0.95 | -$15,061 | 33.4% | Net loser. |
+| 1H | 369 | 22.5% | **0.75** | -$11,759 | 26.6% | Worst of all. |
+| **4H** | **50** | **42.0%** | **1.51** | +$2,861 | **2.6%** | **Positive but tiny sample.** |
+
+### Single-year 2024 was misleading
+
+2024-only at 1H showed PF 1.30 — that was cherry-picked. The full 4+ year
+window shows 1H is PF 0.75 (worst TF). The 2024 window included BTC's
+late-year rally which happened to be trend-following friendly.
+
+### Key observations
+
+- **BTC stops out much more than equities.** 72-77% stop rate vs ~55-60%
+  on equities. BTC's noise is structurally higher, which destroys a
+  trend-following strategy built for stocks.
+- **4H is the only viable TF**, but 50 trades in 4 years is too few to
+  trust. Likely not a real edge.
+- **No EOD drift benefit.** 5-18% EOD exits vs 30% on equities.
+  (Crypto backtests use end-of-last-bar not actual EOD.)
+
+### Verdict on BTC
+
+**TheStrat patterns don't have an edge on BTC.** The strategy is
+well-suited to trending, less noisy instruments during RTH. Crypto's
+24/7 grind chops up stop-limit entries.
+
+This is a clean negative result — worth knowing. Saves us from building
+crypto live execution only to find out the strategy doesn't work there.
+If we want to trade BTC, it'd need a different strategy (mean-reversion
+on Bollinger bands is a better fit for crypto, per the $25K Options
+Challenge discussion).
+
+### Key observations
+
+- **BTC stops out much more than equities.** 74-77% stop rate at 10-15Min
+  vs ~55-60% on equities. BTC's noise is structurally higher at short
+  timeframes, which cuts into a trend-following strategy.
+- **Higher timeframes filter the noise.** At 1H, stop rate drops to 64%,
+  win rate rises to 29%, and PF climbs to 1.30 with only 5.6% max DD.
+- **Low trade count at 1H** (69 in a year) means the sample size is small
+  and more data is needed before trusting it.
+- **No EOD drift.** 3-5% of trades exit at "EOD" (really the end of the
+  backtest window) vs 30% on equities. So no fake PnL to worry about.
+
+### Code changes for crypto support
+
+- Added `aggregate_df_24x7()` in `aggregation.py` (UTC-midnight anchor,
+  no RTH filter). Existing `aggregate_df()` unchanged for equities.
+- New `scripts/btc_backtest.py` — fetches BTC 1Min from Alpaca's
+  `CryptoHistoricalDataClient`, caches as monthly parquet, aggregates
+  and runs the standard backtest engine.
+- BTC data stored under `data/bars/BTC_USD/1Min/<YYYY-MM>.parquet`
+  (filesystem-safe symbol name).
+
+### Verdict on BTC
+
+**BTC at 1H/15Min has a plausible edge** (PF 1.11–1.30 depending on TF).
+Not as strong as NVDA/TSLA on equities, but worth exploring further.
+Needs multi-year testing to confirm stability, plus a parameter sweep.
+Live execution on crypto is a separate engineering effort (Alpaca's
+crypto API is different from equity brackets) — not blocking the
+equity paper trading track.
+
+---
+
+## 2026-04-19 — Paper trading infrastructure shipped (Track A)
+
+Built what's needed to run the equity paper trading campaign for
+4-6 weeks unattended.
+
+### New pieces
+
+- **`src/trade_strats/scheduler.py`** — multi-day loop. Sleeps until
+  next market open (09:25 ET), runs a full session through force-flat,
+  sleeps until next trading day. Skips weekends and US holidays.
+  Crash-recovers with 60s delay.
+- **`run-live` CLI command** — `uv run trade-strats run-live --config …`.
+  Leave running in tmux for weeks. Ctrl+C to stop.
+- **`config/paper-a.yaml`** — NVDA/COIN/MSTR on 10Min, window 10:00-15:00
+  (best-performing config from tuning).
+- **`config/paper-b.yaml`** — TSLA on 15Min (different config because
+  TSLA's best is 15Min, not 10Min).
+- **`scripts/compare_fills.py`** — reads journal, computes slippage
+  per trade/kind/symbol/day. Run nightly during the campaign.
+- **`reports/PAPER_TRADING_LOG.md`** — ops log, daily/weekly entries.
+
+### How to use
+
+```bash
+# Terminal 1
+tmux new -s paper-a
+uv run trade-strats run-live --config config/paper-a.yaml
+# Ctrl+B D to detach
+
+# Terminal 2
+tmux new -s paper-b
+uv run trade-strats run-live --config config/paper-b.yaml
+
+# Each evening
+uv run python scripts/compare_fills.py --since 2026-04-20
+```
+
+Leave running. Check in with me in 4-6 weeks. I'll pull the journal +
+Alpaca state and produce the campaign report.
+
+---
+
 ## 2026-04-17 — Architecture assessment: multi-strategy support
 
 Assessed whether the codebase can support strategies beyond TheStrat,

@@ -1,0 +1,40 @@
+# Paper Trading Config B: TSLA on 15Min bars.
+#
+# Rationale (from reports/PAPER_TRADING_PLAN.md):
+#   - TSLA: PF 1.43 at 15Min R:R 4.0 ATR 0.25, max DD only 9%. Best
+#     ticker + TF combo in the entire sweep for risk-adjusted returns.
+#   - Drop rev-strat: 22-312 config on TSLA was PF 1.47, higher than
+#     with rev-strat (1.42). Unlike NVDA, rev-strat hurts TSLA.
+# Entry window narrowed to 10:00-15:00.
+
+mode: paper
+
+account:
+  sim_equity_usd: 50000
+  risk_pct_per_trade: 0.005
+  daily_loss_cap_pct: 0.02
+  max_concurrent: 2             # only one symbol; limit churn
+  max_trades_per_day: 3
+
+strategy:
+  timeframe: 15Min
+  patterns: [2-2, 3-1-2]        # drop rev-strat for TSLA
+  sides: [long, short]
+  min_rr: 4.0
+  min_bar_atr_mult: 0.25
+  ftfc_timeframes: [1D, 4H, 1H]
+  slippage_per_share: 0.0
+
+watchlist:
+  - TSLA
+
+session:
+  entry_window_et: ["10:00", "15:00"]
+  force_flat_et: "15:55"
+
+blackouts: []
+
+paths:
+  db: data/trades.db
+  events_log: data/events.jsonl
+  reports_dir: reports

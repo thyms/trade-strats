@@ -270,6 +270,53 @@ def aggregate_df(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     return grouped.sort_values("ts").reset_index(drop=True)
 
 
+def aggregate_df_24x7(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """24/7 aggregation for crypto. Anchors on UTC midnight, no RTH filter.
+
+    Used for assets that trade continuously (e.g. BTC). The "daily" bucket
+    (minutes >= 1440) groups on the UTC calendar day.
+    """
+    if df.empty:
+        return df
+
+    if not pd.api.types.is_datetime64_any_dtype(df["ts"]):
+        df = df.copy()
+        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+
+    utc = df["ts"].dt.tz_convert("UTC")
+    ymd = utc.dt.year * 10000 + utc.dt.month * 100 + utc.dt.day
+
+    if minutes >= 1440:
+        bucket_key = ymd
+    else:
+        mins_of_day = utc.dt.hour * 60 + utc.dt.minute
+        bucket_offset = (mins_of_day // minutes) * minutes
+        bucket_key = ymd * 10000 + bucket_offset
+
+    grouped = df.groupby(bucket_key).agg(
+        ts=("ts", "first"),
+        open=("open", "first"),
+        high=("high", "max"),
+        low=("low", "min"),
+        close=("close", "last"),
+        volume=("volume", "sum"),
+    ).reset_index(drop=True)
+
+    if minutes < 1440:
+        utc_g = grouped["ts"].dt.tz_convert("UTC")
+        mins_of_day = utc_g.dt.hour * 60 + utc_g.dt.minute
+        aligned = (mins_of_day // minutes) * minutes
+        delta = aligned - mins_of_day
+        grouped["ts"] = grouped["ts"] + pd.to_timedelta(delta, unit="min")
+    else:
+        # Snap daily bars to UTC midnight
+        utc_g = grouped["ts"].dt.tz_convert("UTC")
+        midnight_delta = -(utc_g.dt.hour * 60 + utc_g.dt.minute)
+        grouped["ts"] = grouped["ts"] + pd.to_timedelta(midnight_delta, unit="min")
+
+    return grouped.sort_values("ts").reset_index(drop=True)
+
+
 def df_to_bars(df: pd.DataFrame) -> list[TimedBar]:
     """Convert a DataFrame with ts/open/high/low/close/volume to TimedBar list."""
     if df.empty:
