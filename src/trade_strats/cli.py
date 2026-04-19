@@ -25,6 +25,7 @@ from trade_strats.market_data import AlpacaSettings, MarketData
 from trade_strats.orchestrator import run_session
 from trade_strats.reconcile import format_report, reconcile
 from trade_strats.reports import save_backtest, save_walk_forward
+from trade_strats.scheduler import run_forever
 
 app = typer.Typer(help="TheStrat 15m trading bot")
 
@@ -39,10 +40,40 @@ def run(
     env_file: Path = typer.Option(DEFAULT_ENV, "--env", "-e", help="Path to .env"),
     schema: Path = typer.Option(DEFAULT_SCHEMA, "--schema", help="Path to SQLite schema.sql"),
 ) -> None:
-    """Start the bot: reconcile, seed session, stream bars + trade updates until EOD."""
+    """Start the bot for one session: reconcile, stream bars, force-flat at EOD, exit."""
     load_dotenv(env_file)
     cfg = Config.from_yaml(config)
     asyncio.run(run_session(cfg, schema))
+
+
+@app.command(name="run-live")
+def run_live_cmd(
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c", help="Path to config.yaml"),
+    env_file: Path = typer.Option(DEFAULT_ENV, "--env", "-e", help="Path to .env"),
+    schema: Path = typer.Option(DEFAULT_SCHEMA, "--schema", help="Path to SQLite schema.sql"),
+) -> None:
+    """Run continuously across multiple trading days.
+
+    Sleeps until the next market open, runs a full session through force-flat,
+    then sleeps until the following trading day. Skips weekends and known US
+    equity holidays. Survives session crashes by logging and retrying.
+
+    Designed to be left running in a terminal / tmux / launchd for weeks.
+    Ctrl+C to stop cleanly.
+    """
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    load_dotenv(env_file)
+    cfg = Config.from_yaml(config)
+    typer.echo(f"Starting continuous run for config {config} — Ctrl+C to stop.")
+    try:
+        asyncio.run(run_forever(cfg, schema))
+    except KeyboardInterrupt:
+        typer.echo("\nStopped by user.")
 
 
 @app.command(name="reconcile")
